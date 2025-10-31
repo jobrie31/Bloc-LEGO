@@ -1,275 +1,647 @@
-// src/App.jsx
-import { useEffect, useMemo, useState } from "react";
-import { packAllWithCost } from "./packing3d_multi";
-import Ortho2D from "./components/Ortho2D";
+import { useEffect, useMemo, useRef, useState } from "react";
 import View3D from "./components/View3D";
+import ExcelPasteModal from "./components/ExcelPasteModal";
 import { ensureSignedIn } from "./lib/firebase";
-import { loadVans, saveVans, loadMoulures, saveMoulures, saveRun } from "./services/firestore";
+import { loadVans, saveVans, loadMoulures, saveMoulures } from "./services/firestore";
 
-// Palette contrastée et stable (12 couleurs)
+// Palette élargie (~48 couleurs) pour éviter l’entremêlement
 const PALETTE = [
-  "#2563eb", "#16a34a", "#dc2626", "#f59e0b",
-  "#9333ea", "#0ea5e9", "#ef4444", "#10b981",
-  "#f97316", "#a855f7", "#14b8a6", "#e11d48",
+  "#2563eb","#16a34a","#dc2626","#f59e0b","#9333ea","#0ea5e9","#ef4444","#10b981",
+  "#f97316","#a855f7","#14b8a6","#e11d48","#1f2937","#64748b","#059669","#d97706",
+  "#7c3aed","#22d3ee","#16a085","#c0392b","#8e44ad","#2980b9","#2ecc71","#e67e22",
+  "#e84393","#00cec9","#6c5ce7","#fdcb6e","#e17055","#0984e3","#00b894","#2d3436",
+  "#ff7675","#74b9ff","#55efc4","#ffeaa7","#fab1a0","#81ecec","#b2bec3","#a29bfe",
+  "#6366f1","#84cc16","#06b6d4","#f43f5e","#fb923c","#10a37f","#d946ef","#22c55e"
 ];
 
+// Valeurs par défaut
+const DEFAULT_ITEM_WIDTH = 48; // l (Y)
+const DEFAULT_ITEM_QTY = 1;
+
 export default function App() {
-  // ----------------- État local
-  const [vans, setVans] = useState([
-    { code: "48", name: "Vanne 48′", l: 576, w: 100, h: 96, cost: 700 },
-    { code: "53", name: "Vanne 53′", l: 636, w: 100, h: 96, cost: 850 },
-  ]);
-
-  const [rows, setRows] = useState([
-    { id: "A", l: 120, w: 45, h: 33, qty: 20 },
-    { id: "B", l: 80,  w: 10, h: 8,  qty: 30 },
-  ]);
-
+  // -------- État
+  // vannes: { name:"", l:"", w:"", h:"", cost:"", maxW:"" }
+  const [vans, setVans] = useState([]);
+  // moulures: { id:"", l:"", h:"", wt:"" }
+  const [rows, setRows] = useState([]);
   const [result, setResult] = useState(null);
   const [loadingFb, setLoadingFb] = useState(false);
   const [msg, setMsg] = useState("");
+  const [signedIn, setSignedIn] = useState(false);
+  const [showPaste, setShowPaste] = useState(false);
 
-  // ----------------- Couleurs
+  // Auto-save (logique conservée; UI retirée)
+  const [autosave, setAutosave] = useState({
+    vans: "idle", rows: "idle",
+    vansAt: null, rowsAt: null,
+    vansErr: "", rowsErr: "",
+  });
+  const hydratingRef = useRef({ vans: false, rows: false });
+  const saveTimersRef = useRef({ vans: null, rows: null });
+
+  // Helpers
+  const sv = (x) => (x ?? "");
+  const isNum = (k) => ["l","h","cost","maxW","wt","w"].includes(k);
+  const toNum = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
+
+  // Couleurs par type d’item
   const colorMap = useMemo(() => {
     const types = rows.map(r => String(r.id ?? "")).filter(Boolean);
     const uniq = [...new Set(types)];
     const map = {};
-    uniq.forEach((t, i) => { map[t] = PALETTE[i % PALETTE.length]; });
+    uniq.forEach((t, i) => (map[t] = PALETTE[i % PALETTE.length]));
     return map;
   }, [rows]);
 
-  // ----------------- Helpers
+  // Fallback coût
+  const costByName = useMemo(
+    () => Object.fromEntries(vans.map(v => [String(v.name || ""), Number(v.cost) || 0])),
+    [vans]
+  );
+
+  // -------- Auto-save
+  const scheduleSave = (kind) => {
+    if (!signedIn) return;
+    if (hydratingRef.current[kind]) return;
+    if (saveTimersRef.current[kind]) clearTimeout(saveTimersRef.current[kind]);
+    setAutosave(s => ({ ...s, [kind]: "saving", [`${kind}Err`]: "" }));
+    saveTimersRef.current[kind] = setTimeout(async () => {
+      try {
+        if (kind === "vans") {
+          await saveVans(vans);
+          setAutosave(s => ({ ...s, vans: "saved", vansAt: new Date(), vansErr: "" }));
+        } else {
+          await saveMoulures(rows);
+          setAutosave(s => ({ ...s, rows: "saved", rowsAt: new Date(), rowsErr: "" }));
+        }
+      } catch (e) {
+        console.error(e);
+        setAutosave(s => ({ ...s, [kind]: "error", [`${kind}Err`]: String(e?.message || e) }));
+      }
+    }, 500);
+  };
+
+  const saveNow = async (kind) => {
+    if (!signedIn) return;
+    try {
+      if (kind === "vans") {
+        await saveVans(vans);
+        setAutosave(s => ({ ...s, vans: "saved", vansAt: new Date(), vansErr: "" }));
+      } else {
+        await saveMoulures(rows);
+        setAutosave(s => ({ ...s, rows: "saved", rowsAt: new Date(), rowsErr: "" }));
+      }
+    } catch (e) {
+      console.error(e);
+      setAutosave(s => ({ ...s, [kind]: "error", [`${kind}Err`]: String(e?.message || e) }));
+    }
+  };
+
+  const flushPendingSaves = async () => {
+    for (const k of ["vans","rows"]) {
+      if (saveTimersRef.current[k]) {
+        clearTimeout(saveTimersRef.current[k]);
+        saveTimersRef.current[k] = null;
+        await saveNow(k);
+      }
+    }
+  };
+
+  // -------- CRUD Vannes
   function updateVan(i, key, val) {
-    setVans(v => v.map((x, idx) => idx === i ? { ...x, [key]: key==="name"? val : Number(val) } : x));
+    setVans(v => v.map((x, idx) => idx === i ? { ...x, [key]: isNum(key) ? (val === "" ? "" : val) : val } : x));
+    scheduleSave("vans");
   }
   function addVan() {
-    setVans(v => [...v, { code: "", name: "Nouvelle vanne", l: 0, w: 0, h: 0, cost: 0 }]);
+    setVans(v => [...v, { name: "", l: "", w: "", h: "", cost: "", maxW: "" }]);
+    scheduleSave("vans");
   }
-  function delVan(i) { setVans(v => v.filter((_, idx) => idx !== i)); }
+  function delVan(i) {
+    setVans(v => v.filter((_, idx) => idx !== i));
+    scheduleSave("vans");
+  }
 
+  // -------- CRUD Moulures
   function updateRow(i, key, val) {
-    const v = key === "id" ? val : Number(val);
-    setRows(r => r.map((row, idx) => (idx === i ? { ...row, [key]: v } : row)));
+    setRows(r => r.map((row, idx) => idx === i ? { ...row, [key]: isNum(key) ? (val === "" ? "" : val) : val } : row));
+    scheduleSave("rows");
   }
   function addRow() {
-    setRows(r => [...r, { id: String.fromCharCode(65 + (r.length % 26)), l: 0, w: 0, h: 0, qty: 1 }]);
+    setRows(r => [...r, { id: "", l: "", h: "", wt: "" }]);
+    scheduleSave("rows");
   }
-  function delRow(i) { setRows(r => r.filter((_, idx) => idx !== i)); }
+  function delRow(i) {
+    setRows(r => r.filter((_, idx) => idx !== i));
+    scheduleSave("rows");
+  }
+  function clearAllRows() {
+    setRows([]);
+    scheduleSave("rows");
+    if (signedIn) saveMoulures([]).catch(()=>{});
+  }
 
-  // ----------------- Firebase: auto sign-in
+  // -------- Import Excel/Sheets
+  function importRows(rowsImported){
+    setRows(prev => {
+      const key = (r)=> `${r.id}|${r.l}|${r.h}`;
+      const map = new Map(prev.map(r=>[key(r), { id:r.id, l:r.l, h:r.h, wt:r.wt }]));
+      for (const r of rowsImported){
+        const item = { id: String(r.id||""), l: toNum(r.l), h: toNum(r.h), wt: toNum(r.wt) };
+        if (!(item.id || (item.l && item.h))) continue;
+        map.set(key(item), item);
+      }
+      const arr = [...map.values()].sort((a,b)=> String(a.id).localeCompare(String(b.id)) || (b.l - a.l));
+      if (signedIn) {
+        saveMoulures(arr).catch(()=>{});
+      }
+      return arr;
+    });
+    scheduleSave("rows");
+  }
+
+  // -------- Init (auth + data)
+  const LS_KEYS = { vans: "bloclego.vans", rows: "bloclego.rows" };
+
   useEffect(() => {
-    ensureSignedIn().catch(console.error);
+    (async () => {
+      try {
+        await ensureSignedIn();
+        setSignedIn(true);
+        // secours local
+        try {
+          const lsV = JSON.parse(localStorage.getItem(LS_KEYS.vans) || "null");
+          if (Array.isArray(lsV)) setVans(lsV);
+          const lsR = JSON.parse(localStorage.getItem(LS_KEYS.rows) || "null");
+          if (Array.isArray(lsR)) setRows(lsR);
+        } catch {}
+        // Firestore
+        setLoadingFb(true);
+        hydratingRef.current.vans = true;
+        hydratingRef.current.rows = true;
+        const [arrV, arrR] = await Promise.all([loadVans(), loadMoulures()]);
+        const convRows = (arrR||[]).map(r=>({ id:String(r.id||""), l:toNum(r.l), h:toNum(r.h), wt:toNum(r.wt) }));
+        if (Array.isArray(arrV)) setVans(arrV);
+        if (Array.isArray(convRows)) setRows(prev => (prev?.length ? prev : convRows));
+      } catch (e) {
+        console.error("Init/auth:", e);
+        setMsg("Erreur d’authentification ou de chargement initial.");
+      } finally {
+        hydratingRef.current.vans = false;
+        hydratingRef.current.rows = false;
+        setLoadingFb(false);
+      }
+    })();
+
+    const handleBeforeUnload = () => { flushPendingSaves(); };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, []);
 
-  // ----------------- Actions Firebase
-  async function handleLoadVans() {
-    try {
-      setLoadingFb(true);
-      const arr = await loadVans();
-      if (arr.length) setVans(arr);
-      setMsg("Vannes chargées depuis Firestore.");
-    } catch (e) {
-      console.error(e);
-      setMsg("Erreur chargement vannes.");
-    } finally {
-      setLoadingFb(false);
+  // persistance locale (secours)
+  useEffect(() => { try { localStorage.setItem(LS_KEYS.vans, JSON.stringify(vans)); } catch {} }, [vans]);
+  useEffect(() => { try { localStorage.setItem(LS_KEYS.rows, JSON.stringify(rows)); } catch {} }, [rows]);
+
+  // -------- Solveur
+  function expandItems() {
+    const out = [];
+    for (const r of rows) {
+      const qty = DEFAULT_ITEM_QTY; // 1
+      const obj = { id: r.id ?? "", l: toNum(r.l), w: DEFAULT_ITEM_WIDTH, h: toNum(r.h), wt: toNum(r.wt) };
+      if (obj.l > 0 && obj.w > 0 && obj.h > 0 && qty > 0) {
+        for (let i = 0; i < qty; i++) out.push({ ...obj });
+      }
     }
-  }
-  async function handleSaveVans() {
-    try {
-      setLoadingFb(true);
-      await saveVans(vans);
-      setMsg("Vannes enregistrées dans Firestore.");
-    } catch (e) {
-      console.error(e);
-      setMsg("Erreur sauvegarde vannes.");
-    } finally {
-      setLoadingFb(false);
-    }
-  }
-  async function handleLoadMoulures() {
-    try {
-      setLoadingFb(true);
-      const arr = await loadMoulures();
-      if (arr.length) setRows(arr);
-      setMsg("Moulures chargées depuis Firestore.");
-    } catch (e) {
-      console.error(e);
-      setMsg("Erreur chargement moulures.");
-    } finally {
-      setLoadingFb(false);
-    }
-  }
-  async function handleSaveMoulures() {
-    try {
-      setLoadingFb(true);
-      await saveMoulures(rows);
-      setMsg("Moulures enregistrées dans Firestore.");
-    } catch (e) {
-      console.error(e);
-      setMsg("Erreur sauvegarde moulures.");
-    } finally {
-      setLoadingFb(false);
-    }
-  }
-  async function handleSaveRun() {
-    try {
-      if (!result) { setMsg("Aucun résultat à enregistrer."); return; }
-      setLoadingFb(true);
-      const id = await saveRun(result);
-      setMsg(`Run enregistré (id: ${id}).`);
-    } catch (e) {
-      console.error(e);
-      setMsg("Erreur sauvegarde du résultat.");
-    } finally {
-      setLoadingFb(false);
-    }
+    return out;
   }
 
-  // ----------------- Calcul
+  function normalizeTypes() {
+    return vans
+      .map((v, i) => ({
+        code: String((v.name || "").trim()) || `van_${i + 1}`,
+        name: String(v.name || ""),
+        l: toNum(v.l), w: toNum(v.w), h: toNum(v.h),
+        cost: toNum(v.cost),
+        maxW: toNum(v.maxW),
+      }))
+      .filter(v => v.l > 0 && v.w > 0 && v.h > 0)
+      .sort((a,b) => a.cost - b.cost);
+  }
+
+  function makePilesByHeight(items, Hcap) {
+    const sorted = [...items].sort((a,b)=>b.h-a.h);
+    const piles = [];
+    for (const it of sorted) {
+      let placed = false;
+      for (const p of piles) {
+        if (p.h + it.h <= Hcap) {
+          p.h += it.h;
+          if (it.l > p.len) p.len = it.l;
+          p.wt += (Number(it.wt)||0);
+          p.items.push(it);
+          p.items.sort((a,b)=> (b.h - a.h) || (b.l - a.l) || ((b.l*b.w*b.h)-(a.l*a.w*a.h)));
+          placed = true;
+          break;
+        }
+      }
+      if (!placed) {
+        piles.push({ h: it.h, len: it.l, wt: (Number(it.wt)||0), items:[it] });
+      }
+    }
+    return piles;
+  }
+
+  // Packing coalescé par colonne
+  function simulateFillOneVan(piles, type) {
+    const Hcap = type.h;
+    const Lcap = type.l;
+    const idxs = [...piles.keys()].sort((i, j) => piles[j].len - piles[i].len || piles[j].h - piles[i].h);
+
+    const cols = [ { stacks: [], used: 0 }, { stacks: [], used: 0 } ];
+    const chosen = new Set();
+    let curW = 0;
+
+    const tryPlaceOnCol = (col, pIdx) => {
+      const p = piles[pIdx];
+      let best = null;
+      for (let s = 0; s < col.stacks.length; s++) {
+        const st = col.stacks[s];
+        if (st.h + p.h <= Hcap) {
+          const newLen = Math.max(st.len, p.len);
+          const delta = newLen - st.len;
+          const newColUsed = col.used + delta;
+          if (newColUsed <= Lcap) {
+            const score = newColUsed;
+            if (!best || score < best.score) best = { type: 'stack', sIdx: s, newLen, score };
+          }
+        }
+      }
+      if (!best) {
+        const newColUsed = col.used + p.len;
+        if (newColUsed <= Lcap) best = { type: 'new', score: newColUsed };
+      }
+      return best;
+    };
+
+    for (const i of idxs) {
+      const p = piles[i];
+      if (p.h > Hcap) continue;
+      if (type.maxW > 0 && curW + (p.wt || 0) > type.maxW) continue;
+
+      const order = cols[0].used <= cols[1].used ? [0, 1] : [1, 0];
+      let bestGlob = null;
+      for (const c of order) {
+        const option = tryPlaceOnCol(cols[c], i);
+        if (option) {
+          if (!bestGlob || option.score < bestGlob.score) bestGlob = { ...option, c };
+        }
+      }
+      if (bestGlob) {
+        const col = cols[bestGlob.c];
+        if (bestGlob.type === 'stack') {
+          const st = col.stacks[bestGlob.sIdx];
+          if (bestGlob.newLen > st.len) {
+            col.used += (bestGlob.newLen - st.len);
+            st.len = bestGlob.newLen;
+          }
+          st.h += p.h;
+          st.idxs.push(i);
+        } else {
+          col.stacks.push({ len: p.len, h: p.h, idxs: [i] });
+          col.used += p.len;
+        }
+        curW += (p.wt || 0);
+        chosen.add(i);
+      }
+    }
+
+    return {
+      chosen: [...chosen],
+      colUsed: [cols[0].used, cols[1].used],
+      weightUsed: curW,
+      plan: cols,
+    };
+  }
+
+  function enforceTallestAtBottom(placed, halfW) {
+    const groups = new Map();
+    for (const b of placed) {
+      const ySlot = b.y < halfW ? 0 : 1;
+      const key = `${b.x}|${ySlot}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(b);
+    }
+    const out = [];
+    for (const [, list] of groups.entries()) {
+      list.sort((a,b)=> (b.h - a.h) || (b.l - a.l) || ((b.l*b.w*b.h)-(a.l*a.w*a.h)));
+      let z = 0;
+      for (const b of list) { out.push({ ...b, z }); z += b.h; }
+    }
+    if (out.length !== placed.length) {
+      return placed
+        .slice()
+        .sort((a,b)=> (a.y - b.y) || (a.x - b.x) || (b.h - a.h))
+        .map((b)=> ({ ...b }));
+    }
+    return out;
+  }
+
+  function buildVanAndRemove(piles, type, simChosenIdxs, plan) {
+    const L = type.l, W = type.w, H = type.h, halfW = W/2;
+    let placed = [];
+    let curW = 0;
+
+    const cols = plan || [{stacks:[], used:0},{stacks:[], used:0}];
+    const usedX = [0, 0];
+
+    for (let c = 0; c < cols.length; c++) {
+      const yBase = c === 0 ? 0 : halfW;
+      for (const st of cols[c].stacks) {
+        const xBase = usedX[c];
+        let items = [];
+        for (const pIdx of st.idxs) {
+          const p = piles[pIdx];
+          if (!p) continue;
+          items.push(...p.items);
+          curW += (Number(p.wt) || 0);
+        }
+        items.sort((a,b)=> (b.h - a.h) || (b.l - a.l) || ((b.l*b.w*b.h)-(a.l*a.w*a.h)));
+        let zCursor = 0;
+        for (const it of items) {
+          placed.push({ type: String(it.id || ""), l: it.l, w: halfW, h: it.h, x: xBase, y: yBase, z: zCursor, wt: Number(it.wt)||0 });
+          zCursor += it.h;
+        }
+        usedX[c] += st.len;
+      }
+    }
+
+    placed = enforceTallestAtBottom(placed, halfW);
+
+    const volPlaced = placed.reduce((s,b)=>s + b.l*b.w*b.h, 0);
+    const volVan = L*W*H;
+    const fillRate = volVan>0 ? Math.max(0,Math.min(1,volPlaced/volVan)) : 0;
+
+    const toRemove = new Set(simChosenIdxs);
+    const remaining = [];
+    for (let i=0;i<piles.length;i++) if (!toRemove.has(i)) remaining.push(piles[i]);
+
+    const vanObj = { code:type.code, name:type.name, l:L, w:W, h:H, placed, fillRate, weightUsed: curW, maxWeight: type.maxW };
+    return { vanObj, remaining };
+  }
+
+  function findCheapestSingleVan(piles, types) {
+    let best = null;
+    for (const t of types) {
+      if (piles.some(p => p.h > t.h)) continue;
+      const sim = simulateFillOneVan(piles, t);
+      if (sim.chosen.length === piles.length) {
+        if (!best || t.cost < best.type.cost) best = { type: t, sim };
+      }
+    }
+    return best;
+  }
+
+  function pickBestTypeForNextVan(remainingPiles, types) {
+    let best = null;
+    for (const t of types) {
+      if (remainingPiles.some(p => p.h > t.h)) continue;
+      const sim = simulateFillOneVan(remainingPiles, t);
+      const lenPacked = sim.colUsed[0] + sim.colUsed[1];
+      if (lenPacked <= 0) continue;
+      if (t.maxW > 0 && sim.weightUsed <= 0) continue;
+      const score = t.cost / lenPacked;
+      if (!best || score < best.score) best = { type: t, sim, score };
+    }
+    return best;
+  }
+
   function run() {
-    const items = rows.filter(r => r.l > 0 && r.w > 0 && r.h > 0 && (Number(r.qty) || 0) > 0);
-    const vanTypes = vans.map(v => ({
-      code: String(v.code||""),
-      name: String(v.name||""),
-      l: Number(v.l)||0, w: Number(v.w)||0, h: Number(v.h)||0,
-    }));
-    const costs = Object.fromEntries(vans.map(v => [String(v.code||""), Number(v.cost)||0]));
+    const items = expandItems();
+    const types = normalizeTypes();
+    if (!items.length || !types.length) { setResult(null); return; }
 
-    const res = packAllWithCost({
-      vanTypes,
-      items,
-      opts: {
-        costs,
-        clearance: 0,          // pas de marge
-        keepZBase: false,      // empilement autorisé
-        lockAxesFully: true,   // orientation fixe
-        maxStackHeight: 1e9,
-        strategy: "min_cost",  // minimise le coût (≈ nb de vannes)
-      },
-    });
-    setResult(res);
+    const Hcap = Math.min(...types.map(t=>t.h));
+    let piles = makePilesByHeight(items, Hcap);
+
+    const Lmax = Math.max(...types.map(t=>t.l));
+    const infeasible = piles.filter(p => p.len > Lmax);
+    if (infeasible.length) {
+      setResult({ stats: { usedVans: 0, totalCost: 0, unplacedCount: infeasible.length }, vans: [], });
+      return;
+    }
+
+    const one = findCheapestSingleVan(piles, types);
+    if (one) {
+      const { type, sim } = one;
+      const { vanObj } = buildVanAndRemove(piles, type, sim.chosen, sim.plan);
+      setResult({ stats: { usedVans: 1, totalCost: type.cost, unplacedCount: 0 }, vans: [vanObj] });
+      return;
+    }
+
+    const vansBuilt = [];
+    let totalCost = 0;
+    while (piles.length) {
+      const pick = pickBestTypeForNextVan(piles, types);
+      if (!pick) break;
+      const { type, sim } = pick;
+      const { vanObj, remaining } = buildVanAndRemove(piles, type, sim.chosen, sim.plan);
+      vansBuilt.push(vanObj);
+      totalCost += type.cost;
+      piles = remaining;
+    }
+
+    setResult({ stats: { usedVans: vansBuilt.length, totalCost, unplacedCount: piles.length }, vans: vansBuilt });
   }
 
-  // ----------------- UI
+  // -------- UI
+  const computedTotalCost = useMemo(() => {
+    if (!result) return 0;
+    const direct = Number(result?.stats?.totalCost || 0);
+    if (direct > 0) return direct;
+    return (result?.vans || []).reduce((sum, v) => {
+      const c = costByName[String(v?.name || "")] || 0;
+      return sum + (Number(c) || 0);
+    }, 0);
+  }, [result, costByName]);
+
   return (
     <div style={{ fontFamily: "system-ui, Arial, sans-serif", padding: 16, maxWidth: 1320, margin: "0 auto" }}>
-      <h1>🧱 Bloc-LEGO — Chargement optimisé (Firebase)</h1>
-      <p style={{ marginTop: 4, opacity: 0.9 }}>
-        Unités : pouces (″). Orientation fixe (L→X, l→Y, H→Z). Empilement autorisé.  
-        Contrainte : au plus 2 moulures de large. Objectif : minimiser le coût total.
-      </p>
+      <h1 style={{ textAlign: "center" }}>🧱 Bloc-LEGO – Chargement de vanne optimisé</h1>
 
-      {/* Actions Firebase */}
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
-        <button onClick={handleLoadVans} disabled={loadingFb}>Charger vannes</button>
-        <button onClick={handleSaveVans} disabled={loadingFb}>Sauver vannes</button>
-        <span style={{ margin: "0 12px", opacity: .6 }}>|</span>
-        <button onClick={handleLoadMoulures} disabled={loadingFb}>Charger moulures</button>
-        <button onClick={handleSaveMoulures} disabled={loadingFb}>Sauver moulures</button>
-        <span style={{ margin: "0 12px", opacity: .6 }}>|</span>
-        <button onClick={handleSaveRun} disabled={loadingFb || !result}>Enregistrer le résultat</button>
-        {msg && <span style={{ opacity: .8 }}>• {msg}</span>}
-      </div>
+      {/* VANNES — centré + couleur distincte */}
+      <section style={{ display: "grid", placeItems: "center", marginTop: 10 }}>
+        <div className="card card-vans">
+          <div className="card-head">
+            <h2 className="card-title">Vannes</h2>
+            <div style={{ flex: 1 }} />
+            <button onClick={addVan} disabled={!signedIn} className="btn-sm">+ Ajouter une vanne</button>
+          </div>
 
-      {/* Vannes éditables */}
-      <section style={{ display: "grid", gridTemplateColumns: "1fr", gap: 12 }}>
-        {vans.map((v, i) => (
-          <fieldset key={i} style={{ padding: 12, borderRadius: 8 }}>
-            <legend><b>Vanne {v.code || i+1}</b></legend>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 8 }}>
-              <label>Code
-                <input value={v.code} onChange={e=>updateVan(i,"code",e.target.value)} />
-              </label>
-              <label>Nom
-                <input value={v.name} onChange={e=>updateVan(i,"name",e.target.value)} />
-              </label>
-              <label>Longueur X
-                <input type="number" value={v.l} onChange={e=>updateVan(i,"l",e.target.value)} />
-              </label>
-              <label>Largeur Y
-                <input type="number" value={v.w} onChange={e=>updateVan(i,"w",e.target.value)} />
-              </label>
-              <label>Hauteur Z
-                <input type="number" value={v.h} onChange={e=>updateVan(i,"h",e.target.value)} />
-              </label>
-              <label>Coût
-                <input type="number" value={v.cost} onChange={e=>updateVan(i,"cost",e.target.value)} />
-              </label>
-            </div>
-            <div style={{ marginTop: 6, display: "flex", gap: 8 }}>
-              <button onClick={()=>delVan(i)}>Supprimer cette vanne</button>
-              {i === vans.length-1 && <button onClick={addVan}>+ Ajouter un type de vanne</button>}
-            </div>
-          </fieldset>
-        ))}
+          {vans.length === 0 && (
+            <div className="hint">Aucune vanne. Ajoute une ligne pour commencer.</div>
+          )}
+
+          <div className="table-wrap">
+            <table className="tbl tbl-vans">
+              <thead>
+                <tr>
+                  <th>Nom</th><th>Longueur X</th><th>Largeur Y</th><th>Hauteur Z</th><th>Coût</th><th>Poids max</th><th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {vans.map((v, i) => (
+                  <tr key={i}>
+                    <td><input value={sv(v.name)} onChange={e=>updateVan(i,"name",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in" /></td>
+                    <td><input type="number" value={sv(v.l)} onChange={e=>updateVan(i,"l",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in" /></td>
+                    <td><input type="number" value={sv(v.w)} onChange={e=>updateVan(i,"w",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in" /></td>
+                    <td><input type="number" value={sv(v.h)} onChange={e=>updateVan(i,"h",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in" /></td>
+                    <td><input type="number" value={sv(v.cost)} onChange={e=>updateVan(i,"cost",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in" /></td>
+                    <td><input type="number" value={sv(v.maxW)} onChange={e=>updateVan(i,"maxW",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in" /></td>
+                    <td style={{ textAlign:"right" }}>
+                      <button onClick={()=>delVan(i)} disabled={!signedIn} className="btn-xs">Supprimer</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </section>
 
-      {/* Moulures */}
-      <h2 style={{ marginTop: 16 }}>Moulures (prismes) — pouces (″)</h2>
-      <table style={{ borderCollapse: "collapse", width: "100%" }}>
-        <thead>
-          <tr>
-            <th>ID</th><th>L (X)</th><th>l (Y)</th><th>H (Z)</th><th>Qté</th><th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r, i) => (
-            <tr key={i}>
-              <td><input value={r.id} onChange={e=>updateRow(i,"id",e.target.value)} style={{ width: 80 }} /></td>
-              <td><input type="number" value={r.l} onChange={e=>updateRow(i,"l",e.target.value)} /></td>
-              <td><input type="number" value={r.w} onChange={e=>updateRow(i,"w",e.target.value)} /></td>
-              <td><input type="number" value={r.h} onChange={e=>updateRow(i,"h",e.target.value)} /></td>
-              <td><input type="number" value={r.qty} onChange={e=>updateRow(i,"qty",e.target.value)} /></td>
-              <td><button onClick={()=>delRow(i)}>Supprimer</button></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-        <button onClick={addRow}>+ Ajouter une ligne</button>
-        <button onClick={run}>Calculer</button>
+      {/* MOULURES — centré + autre couleur */}
+      <section style={{ display: "grid", placeItems: "center", marginTop: 16 }}>
+        <div className="card card-rows">
+          <div className="card-head">
+            <h2 className="card-title">Moulures</h2>
+            <div style={{ flex: 1 }} />
+            <button onClick={()=>setShowPaste(true)} disabled={!signedIn} className="btn-sm">Coller (Excel)</button>
+            <button onClick={clearAllRows} disabled={!signedIn || rows.length===0} className="btn-sm">Tout supprimer</button>
+          </div>
+
+          {rows.length === 0 && (
+            <div className="hint">Aucune moulure. Ajoute une ligne ou colle depuis Excel.</div>
+          )}
+
+          <div className="table-wrap small">
+            <table className="tbl tbl-rows">
+              <thead>
+                <tr>
+                  <th>ID</th><th>L (X)</th><th>H (Z)</th><th>Poids/unité</th><th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={i}>
+                    <td><input value={sv(r.id)}  onChange={e=>updateRow(i,"id",e.target.value)}  onBlur={()=>saveNow("rows")} className="td-in" disabled={!signedIn} /></td>
+                    <td><input type="number" value={sv(r.l)} onChange={e=>updateRow(i,"l",e.target.value)} onBlur={()=>saveNow("rows")} className="td-in" disabled={!signedIn} /></td>
+                    <td><input type="number" value={sv(r.h)} onChange={e=>updateRow(i,"h",e.target.value)} onBlur={()=>saveNow("rows")} className="td-in" disabled={!signedIn} /></td>
+                    <td><input type="number" value={sv(r.wt)} onChange={e=>updateRow(i,"wt",e.target.value)} onBlur={()=>saveNow("rows")} className="td-in" disabled={!signedIn} /></td>
+                    <td style={{ textAlign:"right" }}>
+                      <button onClick={()=>delRow(i)} disabled={!signedIn} className="btn-xs">Supprimer</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems:"center" }}>
+              <button onClick={addRow} disabled={!signedIn} className="btn-sm">+ Ajouter une ligne</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* CALCULER — centré */}
+      <div style={{ display:"grid", placeItems:"center", marginTop: 18 }}>
+        <button
+          onClick={run}
+          disabled={vans.length===0 || rows.length===0}
+          className="btn-calc"
+        >
+          CALCULER
+        </button>
       </div>
 
-      {/* Résultats + vues */}
+      {/* RÉSULTATS — centrés */}
       {result && (
-        <section style={{ marginTop: 20 }}>
-          <h2>Résultats</h2>
-          <p>
-            <b>Vannes utilisées:</b> {result.stats.usedVans} — <b>Coût total:</b> {result.stats.totalCost.toLocaleString()} — <b>Items non placés:</b> {result.stats.unplacedCount}
-          </p>
+        <section style={{ display:"grid", placeItems:"center", marginTop: 20 }}>
+          <div className="card card-results">
+            <h2 className="card-title" style={{ marginBottom: 6 }}>Résultats</h2>
+            <p className="resum">
+              <b>Vannes utilisées:</b> {result.stats.usedVans} —{" "}
+              <b>Coût total:</b> {Number(computedTotalCost).toLocaleString()} —{" "}
+              <b>Items non placés (piles restantes):</b> {result.stats.unplacedCount}
+            </p>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 24 }}>
-            {result.vans.map((v, idx) => (
-              <div key={idx} style={{ border: "1px solid #cbd5e1", borderRadius: 12, padding: 12, background: "#fff" }}>
-                <div style={{ fontWeight: 800, marginBottom: 8, fontSize: 18 }}>
-                  {v.name || v.code || `Vanne ${idx+1}`} — Remplissage (volume) : {Math.round((v.fillRate || 0) * 100)}%
-                </div>
-
-                {/* 3D */}
-                <View3D van={v} colorMap={colorMap} height={420} />
-
-                {/* 2D */}
-                <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 16, marginTop: 10 }}>
-                  <Ortho2D colorMap={colorMap} van={v} axes={["x","y"]} labels={["X (″)", "Y (″)"]} title="Vue de dessus — Plan (X × Y)" />
-                  <Ortho2D colorMap={colorMap} van={v} axes={["x","z"]} labels={["X (″)", "Z (″)"]} title="Vue de face — Façade (X × Z)" />
-                  <Ortho2D colorMap={colorMap} van={v} axes={["y","z"]} labels={["Y (″)", "Z (″)"]} title="Vue de côté — Profil (Y × Z)" />
-                </div>
-              </div>
-            ))}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 16 }}>
+              {result.vans.map((v, idx) => {
+                const label = `Vanne ${idx + 1} - ${sv(v.name) || "—"}`;
+                return (
+                  <div key={idx} className="van-card">
+                    <div className="van-title">{label}</div>
+                    <div className="van-weight">
+                      Poids: <b>{Number(v.weightUsed||0).toLocaleString()}</b>
+                      {v.maxWeight ? <> / <b>{Number(v.maxWeight).toLocaleString()}</b></> : null}
+                    </div>
+                    {/* Titre passé au composant 3D pour affichage en overlay */}
+                    <View3D van={v} colorMap={colorMap} height={380} vanLabel={label} />
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </section>
       )}
 
+      <ExcelPasteModal open={showPaste} onClose={()=>setShowPaste(false)} onImport={importRows} />
+
       <style>{`
-        table th, table td { border: 1px solid #e5e7eb; padding: 6px; }
-        table th { background: #f9fafb; text-align: left; }
-        input { width: 100%; padding: 6px 8px; box-sizing: border-box; }
-        button { padding: 8px 12px; }
-        fieldset { border: 1px solid #e5e7eb; }
-        legend { padding: 0 6px; }
-        label { display: grid; gap: 4px; font-size: 14px; }
+        /* --- Cartes / alignement --- */
+        .card { width: 100%; max-width: 980px; border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; background: #ffffff; box-shadow: 0 6px 16px rgba(0,0,0,.04); }
+        .card-head { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+        .card-title { font-size: 16px; margin: 0; }
+        .hint { opacity: .7; font-style: italic; margin-bottom: 6px; font-size: 12px; }
+        .table-wrap { max-width: 980px; margin: 0 auto; }
+        .table-wrap.small { max-width: 860px; }
+
+        /* --- Couleurs de cartes pour différencier --- */
+        .card-vans { background: #eef2ff; /* indigo-50 */ border-color: #c7d2fe; }
+        .card-rows { background: #fff7ed; /* orange-50 */ border-color: #fed7aa; }
+        .card-results { background: #f0fdf4; /* green-50 */ border-color: #bbf7d0; }
+
+        /* --- Tableaux --- */
+        .tbl { border-collapse: collapse; width: 100%; font-size: 12px; line-height: 1.15; overflow: hidden; border-radius: 8px; }
+        .tbl th, .tbl td { border: 1px solid #e5e7eb; padding: 6px; }
+        .tbl th { text-align: left; font-weight: 700; }
+        .tbl-vans thead th { background: #e0e7ff; }  /* en-tête vannes (indigo-100) */
+        .tbl-rows thead th { background: #ffedd5; }  /* en-tête moulures (orange-100) */
+        .tbl tbody tr:nth-child(odd) { background: rgba(255,255,255,.6); }
+        .tbl tbody tr:nth-child(even){ background: rgba(255,255,255,.85); }
+
+        /* --- Inputs & boutons --- */
+        .td-in { width: 100%; padding: 4px 6px; box-sizing: border-box; font-size: 12px; border: 1px solid #cbd5e1; border-radius: 6px; background: #ffffff; }
+        .btn-xs { padding: 4px 8px; font-size: 12px; border-radius: 8px; border: 1px solid #d1d5db; background: #f8fafc; cursor: pointer; }
+        .btn-sm { padding: 6px 10px; font-size: 12px; border-radius: 10px; border: 1px solid #c7d2fe; background: #e0e7ff; cursor: pointer; }
+        .btn-sm:disabled, .btn-xs:disabled { opacity: .6; cursor: not-allowed; }
+
+        .btn-calc {
+          font-weight: 800; font-size: 18px; padding: 12px 28px; border-radius: 12px;
+          border: 1px solid #1d4ed8; background: #2563eb; color: #fff; cursor: pointer;
+          box-shadow: 0 6px 18px rgba(37,99,235,.25);
+        }
+        .btn-calc:disabled { background: #cbd5e1; border-color: #94a3b8; cursor: not-allowed; }
+
+        /* --- Résultats --- */
+        .resum { margin-top: 4px; font-size: 13px; }
+        .van-card { border: 1px solid #cbd5e1; border-radius: 12px; padding: 12px; background: #fff; }
+        .van-title { font-weight: 800; margin-bottom: 8px; font-size: 16px; }
+        .van-weight { margin-bottom: 8px; font-size: 12px; opacity: .9; }
       `}</style>
+
+      {/* Messages système (facultatif) */}
+      {loadingFb && <div style={{opacity:.7, fontSize:12, marginTop:8, textAlign:"center"}}>Chargement…</div>}
+      {msg && <div style={{fontSize:12, marginTop:4, color:"#b45309", textAlign:"center"}}>{msg}</div>}
     </div>
   );
 }
+
+const tdInput = { padding: "4px 6px", fontSize: 12 };
