@@ -22,7 +22,7 @@ export default function App() {
   // -------- État
   // vannes: { name:"", l:"", w:"", h:"", cost:"", maxW:"" }
   const [vans, setVans] = useState([]);
-  // moulures: { id:"", l:"", h:"", wt:"" }
+  // bundles: { id:"", l:"", h:"", wt:"" }
   const [rows, setRows] = useState([]);
   const [result, setResult] = useState(null);
   const [loadingFb, setLoadingFb] = useState(false);
@@ -43,6 +43,40 @@ export default function App() {
   const sv = (x) => (x ?? "");
   const isNum = (k) => ["l","h","cost","maxW","wt","w"].includes(k);
   const toNum = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
+
+  // ---------- Consolidation des lignes par ID
+  // Règles: pour chaque ID, L = max(L), H = somme(H), wt = somme(wt)
+  function consolidateRows(list) {
+    const byId = new Map();
+
+    for (const r of list || []) {
+      const id = String(r?.id ?? "").trim();
+      const L = toNum(r?.l);
+      const H = toNum(r?.h);
+      const WT = toNum(r?.wt);
+
+      if (!id) {
+        // Sans ID : on garde tel quel (pas de fusion avec d'autres)
+        const key = `__noid__${Math.random()}`;
+        byId.set(key, { id: "", l: L, h: H, wt: WT });
+        continue;
+      }
+
+      if (!byId.has(id)) {
+        byId.set(id, { id, l: L, h: H, wt: WT });
+      } else {
+        const t = byId.get(id);
+        const newL = Math.max(t.l, L);
+        const newH = t.h + H;
+        const newWt = t.wt + WT;
+        byId.set(id, { id, l: newL, h: newH, wt: newWt });
+      }
+    }
+
+    return [...byId.values()].sort(
+      (a, b) => String(a.id).localeCompare(String(b.id)) || b.l - a.l
+    );
+  }
 
   // Couleurs par type d’item
   const colorMap = useMemo(() => {
@@ -121,7 +155,7 @@ export default function App() {
     scheduleSave("vans");
   }
 
-  // -------- CRUD Moulures
+  // -------- CRUD Bundles
   function updateRow(i, key, val) {
     setRows(r => r.map((row, idx) => idx === i ? { ...row, [key]: isNum(key) ? (val === "" ? "" : val) : val } : row));
     scheduleSave("rows");
@@ -136,21 +170,19 @@ export default function App() {
   }
   function clearAllRows() {
     setRows([]);
+    try { localStorage.removeItem(LS_KEYS.rows); } catch {}
     scheduleSave("rows");
     if (signedIn) saveMoulures([]).catch(()=>{});
   }
 
-  // -------- Import Excel/Sheets
+  // -------- Import Excel/Sheets (fusion + consolidation)
   function importRows(rowsImported){
     setRows(prev => {
-      const key = (r)=> `${r.id}|${r.l}|${r.h}`;
-      const map = new Map(prev.map(r=>[key(r), { id:r.id, l:r.l, h:r.h, wt:r.wt }]));
-      for (const r of rowsImported){
-        const item = { id: String(r.id||""), l: toNum(r.l), h: toNum(r.h), wt: toNum(r.wt) };
-        if (!(item.id || (item.l && item.h))) continue;
-        map.set(key(item), item);
-      }
-      const arr = [...map.values()].sort((a,b)=> String(a.id).localeCompare(String(b.id)) || (b.l - a.l));
+      const merged = [
+        ...(prev || []).map(r => ({ id:String(r.id||""), l:toNum(r.l), h:toNum(r.h), wt:toNum(r.wt) })),
+        ...(rowsImported || []).map(r => ({ id:String(r.id||""), l:toNum(r.l), h:toNum(r.h), wt:toNum(r.wt) })),
+      ];
+      const arr = consolidateRows(merged);
       if (signedIn) {
         saveMoulures(arr).catch(()=>{});
       }
@@ -159,7 +191,7 @@ export default function App() {
     scheduleSave("rows");
   }
 
-  // -------- Init (auth + data)
+  // -------- Init (auth + data) — préserver Bundles au refresh
   const LS_KEYS = { vans: "bloclego.vans", rows: "bloclego.rows" };
 
   useEffect(() => {
@@ -167,21 +199,47 @@ export default function App() {
       try {
         await ensureSignedIn();
         setSignedIn(true);
-        // secours local
+
+        // 1) Charger d’abord le localStorage (source de vérité au refresh)
+        let lsV = null, lsR = null;
         try {
-          const lsV = JSON.parse(localStorage.getItem(LS_KEYS.vans) || "null");
-          if (Array.isArray(lsV)) setVans(lsV);
-          const lsR = JSON.parse(localStorage.getItem(LS_KEYS.rows) || "null");
-          if (Array.isArray(lsR)) setRows(lsR);
+          lsV = JSON.parse(localStorage.getItem(LS_KEYS.vans) || "null");
+          lsR = JSON.parse(localStorage.getItem(LS_KEYS.rows) || "null");
         } catch {}
-        // Firestore
+
+        if (Array.isArray(lsV)) setVans(lsV);
+        if (Array.isArray(lsR)) setRows(consolidateRows(lsR));
+
+        // 2) Hydratation Firestore SANS écraser le local si local non vide
         setLoadingFb(true);
         hydratingRef.current.vans = true;
         hydratingRef.current.rows = true;
+
         const [arrV, arrR] = await Promise.all([loadVans(), loadMoulures()]);
-        const convRows = (arrR||[]).map(r=>({ id:String(r.id||""), l:toNum(r.l), h:toNum(r.h), wt:toNum(r.wt) }));
-        if (Array.isArray(arrV)) setVans(arrV);
-        if (Array.isArray(convRows)) setRows(prev => (prev?.length ? prev : convRows));
+        const convRows = (arrR || []).map(r => ({
+          id: String(r.id || ""),
+          l: toNum(r.l),
+          h: toNum(r.h),
+          wt: toNum(r.wt),
+        }));
+
+        // Vannes : si Firestore a des données, on les prend, sinon on garde local
+        if (Array.isArray(arrV) && arrV.length > 0) {
+          setVans(arrV);
+        } else if (Array.isArray(lsV) && lsV.length > 0 && signedIn) {
+          // Cloud vide mais local non vide : pousser vers Firestore
+          saveVans(lsV).catch(() => {});
+        }
+
+        // Bundles : NE PAS écraser le local si déjà présent
+        if (Array.isArray(convRows) && convRows.length > 0) {
+          // Si local est vide, on prend Firestore; sinon on garde local tel quel
+          setRows(prev => (prev && prev.length > 0 ? prev : consolidateRows(convRows)));
+        } else if (Array.isArray(lsR) && lsR.length > 0 && signedIn) {
+          // Firestore vide mais local non vide : pousser vers Firestore
+          saveMoulures(consolidateRows(lsR)).catch(() => {});
+        }
+
       } catch (e) {
         console.error("Init/auth:", e);
         setMsg("Erreur d’authentification ou de chargement initial.");
@@ -465,19 +523,19 @@ export default function App() {
 
   return (
     <div style={{ fontFamily: "system-ui, Arial, sans-serif", padding: 16, maxWidth: 1320, margin: "0 auto" }}>
-      <h1 style={{ textAlign: "center" }}>🧱 Bloc-LEGO – Chargement de vanne optimisé</h1>
+      <h1 style={{ textAlign: "center" }}>🧱 Bloc-LEGO – Chargement optimisé</h1>
 
-      {/* VANNES — centré + couleur distincte */}
+      {/* VANS — centré + couleur distincte */}
       <section style={{ display: "grid", placeItems: "center", marginTop: 10 }}>
         <div className="card card-vans">
           <div className="card-head">
-            <h2 className="card-title">Vannes</h2>
+            <h2 className="card-title">Vans</h2>
             <div style={{ flex: 1 }} />
-            <button onClick={addVan} disabled={!signedIn} className="btn-sm">+ Ajouter une vanne</button>
+            <button onClick={addVan} disabled={!signedIn} className="btn-sm">+ Ajouter une van</button>
           </div>
 
           {vans.length === 0 && (
-            <div className="hint">Aucune vanne. Ajoute une ligne pour commencer.</div>
+            <div className="hint">Aucune van. Ajoute une ligne pour commencer.</div>
           )}
 
           <div className="table-wrap">
@@ -494,7 +552,16 @@ export default function App() {
                     <td><input type="number" value={sv(v.l)} onChange={e=>updateVan(i,"l",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in" /></td>
                     <td><input type="number" value={sv(v.w)} onChange={e=>updateVan(i,"w",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in" /></td>
                     <td><input type="number" value={sv(v.h)} onChange={e=>updateVan(i,"h",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in" /></td>
-                    <td><input type="number" value={sv(v.cost)} onChange={e=>updateVan(i,"cost",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in" /></td>
+                    <td>
+                      <input
+                        type="number"
+                        value={sv(v.cost)}
+                        onChange={e=>updateVan(i,"cost",e.target.value)}
+                        onBlur={()=>saveNow("vans")}
+                        disabled={!signedIn}
+                        className="td-in td-cost"
+                      />
+                    </td>
                     <td><input type="number" value={sv(v.maxW)} onChange={e=>updateVan(i,"maxW",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in" /></td>
                     <td style={{ textAlign:"right" }}>
                       <button onClick={()=>delVan(i)} disabled={!signedIn} className="btn-xs">Supprimer</button>
@@ -507,18 +574,18 @@ export default function App() {
         </div>
       </section>
 
-      {/* MOULURES — centré + autre couleur */}
+      {/* BUNDLES — centré + autre couleur */}
       <section style={{ display: "grid", placeItems: "center", marginTop: 16 }}>
         <div className="card card-rows">
           <div className="card-head">
-            <h2 className="card-title">Moulures</h2>
+            <h2 className="card-title">Bundles</h2>
             <div style={{ flex: 1 }} />
             <button onClick={()=>setShowPaste(true)} disabled={!signedIn} className="btn-sm">Coller (Excel)</button>
             <button onClick={clearAllRows} disabled={!signedIn || rows.length===0} className="btn-sm">Tout supprimer</button>
           </div>
 
           {rows.length === 0 && (
-            <div className="hint">Aucune moulure. Ajoute une ligne ou colle depuis Excel.</div>
+            <div className="hint">Aucun bundle. Ajoute une ligne ou colle depuis Excel.</div>
           )}
 
           <div className="table-wrap small">
@@ -582,7 +649,6 @@ export default function App() {
                       Poids: <b>{Number(v.weightUsed||0).toLocaleString()}</b>
                       {v.maxWeight ? <> / <b>{Number(v.maxWeight).toLocaleString()}</b></> : null}
                     </div>
-                    {/* Titre passé au composant 3D pour affichage en overlay */}
                     <View3D van={v} colorMap={colorMap} height={380} vanLabel={label} />
                   </div>
                 );
@@ -612,8 +678,8 @@ export default function App() {
         .tbl { border-collapse: collapse; width: 100%; font-size: 12px; line-height: 1.15; overflow: hidden; border-radius: 8px; }
         .tbl th, .tbl td { border: 1px solid #e5e7eb; padding: 6px; }
         .tbl th { text-align: left; font-weight: 700; }
-        .tbl-vans thead th { background: #e0e7ff; }  /* en-tête vannes (indigo-100) */
-        .tbl-rows thead th { background: #ffedd5; }  /* en-tête moulures (orange-100) */
+        .tbl-vans thead th { background: #e0e7ff; }
+        .tbl-rows thead th { background: #ffedd5; }
         .tbl tbody tr:nth-child(odd) { background: rgba(255,255,255,.6); }
         .tbl tbody tr:nth-child(even){ background: rgba(255,255,255,.85); }
 
@@ -635,6 +701,10 @@ export default function App() {
         .van-card { border: 1px solid #cbd5e1; border-radius: 12px; padding: 12px; background: #fff; }
         .van-title { font-weight: 800; margin-bottom: 8px; font-size: 16px; }
         .van-weight { margin-bottom: 8px; font-size: 12px; opacity: .9; }
+
+        /* Inputs "Coût" en jaune */
+        .td-cost { background: #FEF9C3; }           /* amber-100 */
+        .td-cost:disabled { background: #FEF9C3; opacity: .85; }
       `}</style>
 
       {/* Messages système (facultatif) */}
