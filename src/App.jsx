@@ -14,15 +14,46 @@ const PALETTE = [
   "#6366f1","#84cc16","#06b6d4","#f43f5e","#fb923c","#10a37f","#d946ef","#22c55e"
 ];
 
-// Valeurs par défaut
-const DEFAULT_ITEM_WIDTH = 48; // l (Y)
+const DEFAULT_ITEM_WIDTH = 48;
 const DEFAULT_ITEM_QTY = 1;
 
+// ---- Helper commun pour calculer le coût à partir d'une liste de vans placées
+function calcBillingFromVansList(vansList) {
+  let total = 0;
+  let usedCount = 0;
+  const groupUsage = new Map(); // key -> { used, costPerVan, groupSize }
+
+  for (const v of (vansList || [])) {
+    const costPerVan = Number(v.costPerVan || 0);
+    const groupSize = Number(v.groupSize || 1);
+    const key = String(v.group || v.name || "").trim();
+
+    if (!key || groupSize <= 1) {
+      total += costPerVan;
+      usedCount += 1;
+    } else {
+      if (!groupUsage.has(key)) {
+        groupUsage.set(key, { used: 0, costPerVan, groupSize });
+      }
+      const g = groupUsage.get(key);
+      g.used += 1;
+    }
+  }
+
+  for (const [, g] of groupUsage) {
+    const packs = Math.ceil(g.used / g.groupSize);
+    const costPerPack = g.costPerVan * g.groupSize;
+    total += packs * costPerPack;
+    usedCount += packs * g.groupSize;
+  }
+
+  return { totalCost: total, usedVans: usedCount };
+}
+
 export default function App() {
-  // -------- État
-  // vannes: { name:"", l:"", w:"", h:"", cost:"", maxW:"" }
+  // vannes: { name, group, l, w, h, cost, maxW }
   const [vans, setVans] = useState([]);
-  // bundles: { id:"", l:"", h:"", wt:"" }
+  // bundles: { id, l, h, wt }
   const [rows, setRows] = useState([]);
   const [result, setResult] = useState(null);
   const [loadingFb, setLoadingFb] = useState(false);
@@ -30,7 +61,6 @@ export default function App() {
   const [signedIn, setSignedIn] = useState(false);
   const [showPaste, setShowPaste] = useState(false);
 
-  // Auto-save (logique conservée; UI retirée)
   const [autosave, setAutosave] = useState({
     vans: "idle", rows: "idle",
     vansAt: null, rowsAt: null,
@@ -39,16 +69,13 @@ export default function App() {
   const hydratingRef = useRef({ vans: false, rows: false });
   const saveTimersRef = useRef({ vans: null, rows: null });
 
-  // Helpers
   const sv = (x) => (x ?? "");
   const isNum = (k) => ["l","h","cost","maxW","wt","w"].includes(k);
   const toNum = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
 
-  // ---------- Consolidation des lignes par ID
-  // Règles: pour chaque ID, L = max(L), H = somme(H), wt = somme(wt)
+  // ---------- Consolidation bundles
   function consolidateRows(list) {
     const byId = new Map();
-
     for (const r of list || []) {
       const id = String(r?.id ?? "").trim();
       const L = toNum(r?.l);
@@ -56,7 +83,6 @@ export default function App() {
       const WT = toNum(r?.wt);
 
       if (!id) {
-        // Sans ID : on garde tel quel (pas de fusion avec d'autres)
         const key = `__noid__${Math.random()}`;
         byId.set(key, { id: "", l: L, h: H, wt: WT });
         continue;
@@ -66,10 +92,12 @@ export default function App() {
         byId.set(id, { id, l: L, h: H, wt: WT });
       } else {
         const t = byId.get(id);
-        const newL = Math.max(t.l, L);
-        const newH = t.h + H;
-        const newWt = t.wt + WT;
-        byId.set(id, { id, l: newL, h: newH, wt: newWt });
+        byId.set(id, {
+          id,
+          l: Math.max(t.l, L),
+          h: t.h + H,
+          wt: t.wt + WT
+        });
       }
     }
 
@@ -87,13 +115,22 @@ export default function App() {
     return map;
   }, [rows]);
 
-  // Fallback coût
-  const costByName = useMemo(
-    () => Object.fromEntries(vans.map(v => [String(v.name || ""), Number(v.cost) || 0])),
-    [vans]
-  );
+  // Infos de groupe : on utilise group || name
+  const groupInfo = useMemo(() => {
+    const map = new Map();
+    vans.forEach((v, idx) => {
+      const key = String(v.group || v.name || "").trim();
+      if (!key) return;
+      if (!map.has(key)) {
+        map.set(key, { firstIdx: idx, count: 1 });
+      } else {
+        map.get(key).count += 1;
+      }
+    });
+    return map;
+  }, [vans]);
 
-  // -------- Auto-save
+  // Auto-save
   const scheduleSave = (kind) => {
     if (!signedIn) return;
     if (hydratingRef.current[kind]) return;
@@ -143,13 +180,44 @@ export default function App() {
 
   // -------- CRUD Vannes
   function updateVan(i, key, val) {
-    setVans(v => v.map((x, idx) => idx === i ? { ...x, [key]: isNum(key) ? (val === "" ? "" : val) : val } : x));
+    setVans(prev => {
+      if (key === "cost") {
+        const target = prev[i];
+        if (!target) return prev;
+        const groupKey = String(target.group || target.name || "").trim();
+        const newCost = val === "" ? "" : val;
+
+        if (!groupKey) {
+          return prev.map((x, idx) =>
+            idx === i ? { ...x, cost: newCost } : x
+          );
+        }
+
+        return prev.map(van => {
+          const k = String(van.group || van.name || "").trim();
+          if (k === groupKey) return { ...van, cost: newCost };
+          return van;
+        });
+      }
+
+      return prev.map((x, idx) =>
+        idx === i
+          ? { ...x, [key]: isNum(key) ? (val === "" ? "" : val) : val }
+          : x
+      );
+    });
     scheduleSave("vans");
   }
+
   function addVan() {
-    setVans(v => [...v, { name: "", l: "", w: "", h: "", cost: "", maxW: "" }]);
+    setVans(v => [...v, {
+      name: "", group: "",
+      l: "", w: "", h: "",
+      cost: "", maxW: ""
+    }]);
     scheduleSave("vans");
   }
+
   function delVan(i) {
     setVans(v => v.filter((_, idx) => idx !== i));
     scheduleSave("vans");
@@ -157,17 +225,26 @@ export default function App() {
 
   // -------- CRUD Bundles
   function updateRow(i, key, val) {
-    setRows(r => r.map((row, idx) => idx === i ? { ...row, [key]: isNum(key) ? (val === "" ? "" : val) : val } : row));
+    setRows(r =>
+      r.map((row, idx) =>
+        idx === i
+          ? { ...row, [key]: isNum(key) ? (val === "" ? "" : val) : val }
+          : row
+      )
+    );
     scheduleSave("rows");
   }
+
   function addRow() {
     setRows(r => [...r, { id: "", l: "", h: "", wt: "" }]);
     scheduleSave("rows");
   }
+
   function delRow(i) {
     setRows(r => r.filter((_, idx) => idx !== i));
     scheduleSave("rows");
   }
+
   function clearAllRows() {
     setRows([]);
     try { localStorage.removeItem(LS_KEYS.rows); } catch {}
@@ -175,23 +252,25 @@ export default function App() {
     if (signedIn) saveMoulures([]).catch(()=>{});
   }
 
-  // -------- Import Excel/Sheets (fusion + consolidation)
+  // -------- Import Excel/Sheets
   function importRows(rowsImported){
     setRows(prev => {
       const merged = [
-        ...(prev || []).map(r => ({ id:String(r.id||""), l:toNum(r.l), h:toNum(r.h), wt:toNum(r.wt) })),
-        ...(rowsImported || []).map(r => ({ id:String(r.id||""), l:toNum(r.l), h:toNum(r.h), wt:toNum(r.wt) })),
+        ...(prev || []).map(r => ({
+          id:String(r.id||""), l:toNum(r.l), h:toNum(r.h), wt:toNum(r.wt)
+        })),
+        ...(rowsImported || []).map(r => ({
+          id:String(r.id||""), l:toNum(r.l), h:toNum(r.h), wt:toNum(r.wt)
+        })),
       ];
       const arr = consolidateRows(merged);
-      if (signedIn) {
-        saveMoulures(arr).catch(()=>{});
-      }
+      if (signedIn) saveMoulures(arr).catch(()=>{});
       return arr;
     });
     scheduleSave("rows");
   }
 
-  // -------- Init (auth + data) — préserver Bundles au refresh
+  // -------- Init (auth + data)
   const LS_KEYS = { vans: "bloclego.vans", rows: "bloclego.rows" };
 
   useEffect(() => {
@@ -200,7 +279,6 @@ export default function App() {
         await ensureSignedIn();
         setSignedIn(true);
 
-        // 1) Charger d’abord le localStorage (source de vérité au refresh)
         let lsV = null, lsR = null;
         try {
           lsV = JSON.parse(localStorage.getItem(LS_KEYS.vans) || "null");
@@ -210,7 +288,6 @@ export default function App() {
         if (Array.isArray(lsV)) setVans(lsV);
         if (Array.isArray(lsR)) setRows(consolidateRows(lsR));
 
-        // 2) Hydratation Firestore SANS écraser le local si local non vide
         setLoadingFb(true);
         hydratingRef.current.vans = true;
         hydratingRef.current.rows = true;
@@ -223,20 +300,15 @@ export default function App() {
           wt: toNum(r.wt),
         }));
 
-        // Vannes : si Firestore a des données, on les prend, sinon on garde local
         if (Array.isArray(arrV) && arrV.length > 0) {
           setVans(arrV);
         } else if (Array.isArray(lsV) && lsV.length > 0 && signedIn) {
-          // Cloud vide mais local non vide : pousser vers Firestore
           saveVans(lsV).catch(() => {});
         }
 
-        // Bundles : NE PAS écraser le local si déjà présent
         if (Array.isArray(convRows) && convRows.length > 0) {
-          // Si local est vide, on prend Firestore; sinon on garde local tel quel
           setRows(prev => (prev && prev.length > 0 ? prev : consolidateRows(convRows)));
         } else if (Array.isArray(lsR) && lsR.length > 0 && signedIn) {
-          // Firestore vide mais local non vide : pousser vers Firestore
           saveMoulures(consolidateRows(lsR)).catch(() => {});
         }
 
@@ -255,16 +327,26 @@ export default function App() {
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, []);
 
-  // persistance locale (secours)
-  useEffect(() => { try { localStorage.setItem(LS_KEYS.vans, JSON.stringify(vans)); } catch {} }, [vans]);
-  useEffect(() => { try { localStorage.setItem(LS_KEYS.rows, JSON.stringify(rows)); } catch {} }, [rows]);
+  useEffect(() => {
+    try { localStorage.setItem(LS_KEYS.vans, JSON.stringify(vans)); } catch {}
+  }, [vans]);
+
+  useEffect(() => {
+    try { localStorage.setItem(LS_KEYS.rows, JSON.stringify(rows)); } catch {}
+  }, [rows]);
 
   // -------- Solveur
   function expandItems() {
     const out = [];
     for (const r of rows) {
-      const qty = DEFAULT_ITEM_QTY; // 1
-      const obj = { id: r.id ?? "", l: toNum(r.l), w: DEFAULT_ITEM_WIDTH, h: toNum(r.h), wt: toNum(r.wt) };
+      const qty = DEFAULT_ITEM_QTY;
+      const obj = {
+        id: r.id ?? "",
+        l: toNum(r.l),
+        w: DEFAULT_ITEM_WIDTH,
+        h: toNum(r.h),
+        wt: toNum(r.wt)
+      };
       if (obj.l > 0 && obj.w > 0 && obj.h > 0 && qty > 0) {
         for (let i = 0; i < qty; i++) out.push({ ...obj });
       }
@@ -272,17 +354,44 @@ export default function App() {
     return out;
   }
 
+  // Types de vans normalisés (pour le solveur)
   function normalizeTypes() {
     return vans
-      .map((v, i) => ({
-        code: String((v.name || "").trim()) || `van_${i + 1}`,
-        name: String(v.name || ""),
-        l: toNum(v.l), w: toNum(v.w), h: toNum(v.h),
-        cost: toNum(v.cost),
-        maxW: toNum(v.maxW),
-      }))
-      .filter(v => v.l > 0 && v.w > 0 && v.h > 0)
-      .sort((a,b) => a.cost - b.cost);
+      .map((v, i) => {
+        const l = toNum(v.l);
+        const w = toNum(v.w);
+        const h = toNum(v.h);
+        if (!(l > 0 && w > 0 && h > 0)) return null;
+
+        const groupKey = String(v.group || v.name || "").trim();
+        const info = groupKey ? groupInfo.get(groupKey) : null;
+        const groupSize = info?.count ?? 1;
+
+        let groupCostTotal;
+        if (groupSize > 1 && info) {
+          const master = vans[info.firstIdx] || v;
+          groupCostTotal = toNum(master.cost);
+        } else {
+          groupCostTotal = toNum(v.cost);
+        }
+
+        const costPerVan = groupSize > 1
+          ? (groupCostTotal / groupSize || 0)
+          : groupCostTotal;
+
+        return {
+          code: String((v.name || "").trim()) || `van_${i + 1}`,
+          name: String(v.name || ""),
+          group: groupKey,
+          l, w, h,
+          costPerVan,
+          groupSize,
+          groupCostTotal,
+          maxW: toNum(v.maxW),
+        };
+      })
+      .filter(Boolean)
+      .sort((a,b) => a.costPerVan - b.costPerVan);
   }
 
   function makePilesByHeight(items, Hcap) {
@@ -296,23 +405,33 @@ export default function App() {
           if (it.l > p.len) p.len = it.l;
           p.wt += (Number(it.wt)||0);
           p.items.push(it);
-          p.items.sort((a,b)=> (b.h - a.h) || (b.l - a.l) || ((b.l*b.w*b.h)-(a.l*a.w*a.h)));
+          p.items.sort((a,b)=>
+            (b.h - a.h) ||
+            (b.l - a.l) ||
+            ((b.l*b.w*b.h)-(a.l*a.w*a.h))
+          );
           placed = true;
           break;
         }
       }
       if (!placed) {
-        piles.push({ h: it.h, len: it.l, wt: (Number(it.wt)||0), items:[it] });
+        piles.push({
+          h: it.h,
+          len: it.l,
+          wt: (Number(it.wt)||0),
+          items:[it]
+        });
       }
     }
     return piles;
   }
 
-  // Packing coalescé par colonne
   function simulateFillOneVan(piles, type) {
     const Hcap = type.h;
     const Lcap = type.l;
-    const idxs = [...piles.keys()].sort((i, j) => piles[j].len - piles[i].len || piles[j].h - piles[i].h);
+    const idxs = [...piles.keys()].sort(
+      (i, j) => piles[j].len - piles[i].len || piles[j].h - piles[i].h
+    );
 
     const cols = [ { stacks: [], used: 0 }, { stacks: [], used: 0 } ];
     const chosen = new Set();
@@ -329,13 +448,17 @@ export default function App() {
           const newColUsed = col.used + delta;
           if (newColUsed <= Lcap) {
             const score = newColUsed;
-            if (!best || score < best.score) best = { type: 'stack', sIdx: s, newLen, score };
+            if (!best || score < best.score) {
+              best = { type: 'stack', sIdx: s, newLen, score };
+            }
           }
         }
       }
       if (!best) {
         const newColUsed = col.used + p.len;
-        if (newColUsed <= Lcap) best = { type: 'new', score: newColUsed };
+        if (newColUsed <= Lcap) {
+          best = { type: 'new', score: newColUsed };
+        }
       }
       return best;
     };
@@ -350,7 +473,9 @@ export default function App() {
       for (const c of order) {
         const option = tryPlaceOnCol(cols[c], i);
         if (option) {
-          if (!bestGlob || option.score < bestGlob.score) bestGlob = { ...option, c };
+          if (!bestGlob || option.score < bestGlob.score) {
+            bestGlob = { ...option, c };
+          }
         }
       }
       if (bestGlob) {
@@ -380,6 +505,7 @@ export default function App() {
     };
   }
 
+  // Empilement : plus long en bas
   function enforceTallestAtBottom(placed, halfW) {
     const groups = new Map();
     for (const b of placed) {
@@ -388,18 +514,35 @@ export default function App() {
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(b);
     }
+
     const out = [];
     for (const [, list] of groups.entries()) {
-      list.sort((a,b)=> (b.h - a.h) || (b.l - a.l) || ((b.l*b.w*b.h)-(a.l*a.w*a.h)));
+      list.sort(
+        (a, b) =>
+          (b.l - a.l) ||
+          (b.h - a.h) ||
+          ((b.l * b.w * b.h) - (a.l * a.w * a.h))
+      );
       let z = 0;
-      for (const b of list) { out.push({ ...b, z }); z += b.h; }
+      for (const b of list) {
+        out.push({ ...b, z });
+        z += b.h;
+      }
     }
+
     if (out.length !== placed.length) {
       return placed
         .slice()
-        .sort((a,b)=> (a.y - b.y) || (a.x - b.x) || (b.h - a.h))
-        .map((b)=> ({ ...b }));
+        .sort(
+          (a, b) =>
+            (a.y - b.y) ||
+            (a.x - b.x) ||
+            (b.l - a.l) ||
+            (b.h - a.h)
+        )
+        .map((b) => ({ ...b }));
     }
+
     return out;
   }
 
@@ -422,10 +565,23 @@ export default function App() {
           items.push(...p.items);
           curW += (Number(p.wt) || 0);
         }
-        items.sort((a,b)=> (b.h - a.h) || (b.l - a.l) || ((b.l*b.w*b.h)-(a.l*a.w*a.h)));
+        items.sort((a,b)=>
+          (b.h - a.h) ||
+          (b.l - a.l) ||
+          ((b.l*b.w*b.h)-(a.l*a.w*a.h))
+        );
         let zCursor = 0;
         for (const it of items) {
-          placed.push({ type: String(it.id || ""), l: it.l, w: halfW, h: it.h, x: xBase, y: yBase, z: zCursor, wt: Number(it.wt)||0 });
+          placed.push({
+            type: String(it.id || ""),
+            l: it.l,
+            w: halfW,
+            h: it.h,
+            x: xBase,
+            y: yBase,
+            z: zCursor,
+            wt: Number(it.wt)||0
+          });
           zCursor += it.h;
         }
         usedX[c] += st.len;
@@ -434,42 +590,51 @@ export default function App() {
 
     placed = enforceTallestAtBottom(placed, halfW);
 
-    const volPlaced = placed.reduce((s,b)=>s + b.l*b.w*b.h, 0);
-    const volVan = L*W*H;
-    const fillRate = volVan>0 ? Math.max(0,Math.min(1,volPlaced/volVan)) : 0;
-
     const toRemove = new Set(simChosenIdxs);
     const remaining = [];
     for (let i=0;i<piles.length;i++) if (!toRemove.has(i)) remaining.push(piles[i]);
 
-    const vanObj = { code:type.code, name:type.name, l:L, w:W, h:H, placed, fillRate, weightUsed: curW, maxWeight: type.maxW };
+    const vanObj = {
+      code: type.code,
+      name: type.name,
+      group: type.group,
+      l: L,
+      w: W,
+      h: H,
+      placed,
+      weightUsed: curW,
+      maxWeight: type.maxW,
+      costPerVan: type.costPerVan,
+      groupSize: type.groupSize,
+      groupCostTotal: type.groupCostTotal
+    };
     return { vanObj, remaining };
   }
 
-  function findCheapestSingleVan(piles, types) {
-    let best = null;
-    for (const t of types) {
-      if (piles.some(p => p.h > t.h)) continue;
-      const sim = simulateFillOneVan(piles, t);
-      if (sim.chosen.length === piles.length) {
-        if (!best || t.cost < best.type.cost) best = { type: t, sim };
-      }
-    }
-    return best;
-  }
+  // Solution "monotype" : uniquement une famille de vans
+  function solveWithSingleType(basePiles, type) {
+    let piles = JSON.parse(JSON.stringify(basePiles));
+    const vansBuilt = [];
 
-  function pickBestTypeForNextVan(remainingPiles, types) {
-    let best = null;
-    for (const t of types) {
-      if (remainingPiles.some(p => p.h > t.h)) continue;
-      const sim = simulateFillOneVan(remainingPiles, t);
-      const lenPacked = sim.colUsed[0] + sim.colUsed[1];
-      if (lenPacked <= 0) continue;
-      if (t.maxW > 0 && sim.weightUsed <= 0) continue;
-      const score = t.cost / lenPacked;
-      if (!best || score < best.score) best = { type: t, sim, score };
+    while (piles.length) {
+      const sim = simulateFillOneVan(piles, type);
+      if (!sim.chosen.length) {
+        return null; // impossible avec ce type seul
+      }
+      const { vanObj, remaining } = buildVanAndRemove(piles, type, sim.chosen, sim.plan);
+      vansBuilt.push(vanObj);
+      piles = remaining;
     }
-    return best;
+
+    const billing = calcBillingFromVansList(vansBuilt);
+    return {
+      stats: {
+        usedVans: billing.usedVans,
+        totalCost: billing.totalCost,
+        unplacedCount: 0
+      },
+      vans: vansBuilt
+    };
   }
 
   function run() {
@@ -478,54 +643,80 @@ export default function App() {
     if (!items.length || !types.length) { setResult(null); return; }
 
     const Hcap = Math.min(...types.map(t=>t.h));
-    let piles = makePilesByHeight(items, Hcap);
+    const basePiles = makePilesByHeight(items, Hcap);
 
     const Lmax = Math.max(...types.map(t=>t.l));
-    const infeasible = piles.filter(p => p.len > Lmax);
+    const infeasible = basePiles.filter(p => p.len > Lmax);
     if (infeasible.length) {
-      setResult({ stats: { usedVans: 0, totalCost: 0, unplacedCount: infeasible.length }, vans: [], });
+      setResult({
+        stats: { usedVans: 0, totalCost: 0, unplacedCount: infeasible.length },
+        vans: [],
+      });
       return;
     }
 
-    const one = findCheapestSingleVan(piles, types);
-    if (one) {
-      const { type, sim } = one;
-      const { vanObj } = buildVanAndRemove(piles, type, sim.chosen, sim.plan);
-      setResult({ stats: { usedVans: 1, totalCost: type.cost, unplacedCount: 0 }, vans: [vanObj] });
-      return;
+    // --- 1) Solutions "monotype" (1 seul type de van)
+    let bestPure = null;
+    for (const t of types) {
+      const sol = solveWithSingleType(basePiles, t);
+      if (!sol) continue;
+      if (!bestPure || sol.stats.totalCost < bestPure.stats.totalCost) {
+        bestPure = sol;
+      }
     }
 
+    // --- 2) Solution mixte (greedy comme avant)
+    let piles = JSON.parse(JSON.stringify(basePiles));
     const vansBuilt = [];
-    let totalCost = 0;
     while (piles.length) {
-      const pick = pickBestTypeForNextVan(piles, types);
-      if (!pick) break;
-      const { type, sim } = pick;
+      // choisir le meilleur type pour le prochain van
+      let best = null;
+      for (const t of types) {
+        if (piles.some(p => p.h > t.h)) continue;
+        const sim = simulateFillOneVan(piles, t);
+        const lenPacked = sim.colUsed[0] + sim.colUsed[1];
+        if (lenPacked <= 0) continue;
+        if (t.maxW > 0 && sim.weightUsed <= 0) continue;
+        const score = t.costPerVan / lenPacked;
+        if (!best || score < best.score) best = { type: t, sim, score };
+      }
+      if (!best) break;
+      const { type, sim } = best;
       const { vanObj, remaining } = buildVanAndRemove(piles, type, sim.chosen, sim.plan);
       vansBuilt.push(vanObj);
-      totalCost += type.cost;
       piles = remaining;
     }
+    const mixedBilling = calcBillingFromVansList(vansBuilt);
+    const mixedSolution = {
+      stats: {
+        usedVans: mixedBilling.usedVans,
+        totalCost: mixedBilling.totalCost,
+        unplacedCount: piles.length
+      },
+      vans: vansBuilt
+    };
 
-    setResult({ stats: { usedVans: vansBuilt.length, totalCost, unplacedCount: piles.length }, vans: vansBuilt });
+    // --- 3) Choisir la meilleure solution en coût
+    let finalSolution = mixedSolution;
+    if (bestPure && (bestPure.stats.totalCost <= mixedSolution.stats.totalCost || mixedSolution.stats.unplacedCount > 0)) {
+      finalSolution = bestPure;
+    }
+
+    setResult(finalSolution);
   }
 
-  // -------- UI
-  const computedTotalCost = useMemo(() => {
-    if (!result) return 0;
-    const direct = Number(result?.stats?.totalCost || 0);
-    if (direct > 0) return direct;
-    return (result?.vans || []).reduce((sum, v) => {
-      const c = costByName[String(v?.name || "")] || 0;
-      return sum + (Number(c) || 0);
-    }, 0);
-  }, [result, costByName]);
+  // -------- Coût affiché (recalcule sur result.vans, par sécurité)
+  const billing = useMemo(() => {
+    if (!result) return { totalCost: 0, usedVans: 0 };
+    return calcBillingFromVansList(result.vans || []);
+  }, [result]);
 
+  // -------- UI
   return (
     <div style={{ fontFamily: "system-ui, Arial, sans-serif", padding: 16, maxWidth: 1320, margin: "0 auto" }}>
       <h1 style={{ textAlign: "center" }}>🧱 Bloc-LEGO – Chargement optimisé</h1>
 
-      {/* VANS — centré + couleur distincte */}
+      {/* VANS */}
       <section style={{ display: "grid", placeItems: "center", marginTop: 10 }}>
         <div className="card card-vans">
           <div className="card-head">
@@ -535,53 +726,153 @@ export default function App() {
           </div>
 
           {vans.length === 0 && (
-            <div className="hint">Aucune van. Ajoute une ligne pour commencer.</div>
+            <div className="hint">
+              Aucune van. Ajoute une ligne pour commencer.
+              <br/>
+              Pour un <b>bi-train</b> 30'+30', mets 2 lignes avec le même <b>Groupe</b> (ou le même Nom)  
+              et mets dans <b>Coût</b> le <u>prix total du bi-train</u> (ex: 1 100).  
+              Le système partage ce coût sur les remorques pour le calcul, mais facture par pack complet.
+            </div>
           )}
 
           <div className="table-wrap">
             <table className="tbl tbl-vans">
               <thead>
                 <tr>
-                  <th>Nom</th><th>Longueur X</th><th>Largeur Y</th><th>Hauteur Z</th><th>Coût</th><th>Poids max</th><th></th>
+                  <th>Nom</th>
+                  <th>Groupe (optionnel)</th>
+                  <th>Longueur X</th>
+                  <th>Largeur Y</th>
+                  <th>Hauteur Z</th>
+                  <th>Coût (total groupe)</th>
+                  <th>Poids max</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
-                {vans.map((v, i) => (
-                  <tr key={i}>
-                    <td><input value={sv(v.name)} onChange={e=>updateVan(i,"name",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in" /></td>
-                    <td><input type="number" value={sv(v.l)} onChange={e=>updateVan(i,"l",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in" /></td>
-                    <td><input type="number" value={sv(v.w)} onChange={e=>updateVan(i,"w",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in" /></td>
-                    <td><input type="number" value={sv(v.h)} onChange={e=>updateVan(i,"h",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in" /></td>
-                    <td>
-                      <input
-                        type="number"
-                        value={sv(v.cost)}
-                        onChange={e=>updateVan(i,"cost",e.target.value)}
-                        onBlur={()=>saveNow("vans")}
-                        disabled={!signedIn}
-                        className="td-in td-cost"
-                      />
-                    </td>
-                    <td><input type="number" value={sv(v.maxW)} onChange={e=>updateVan(i,"maxW",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in" /></td>
-                    <td style={{ textAlign:"right" }}>
-                      <button onClick={()=>delVan(i)} disabled={!signedIn} className="btn-xs">Supprimer</button>
-                    </td>
-                  </tr>
-                ))}
+                {vans.map((v, i) => {
+                  const key = String(v.group || v.name || "").trim();
+                  const info = key ? groupInfo.get(key) : null;
+                  const isGroup = info && info.count > 1;
+                  const isMaster = !isGroup || (info && info.firstIdx === i);
+                  const costDisabled = !signedIn || !isMaster;
+
+                  return (
+                    <tr key={i}>
+                      <td>
+                        <input
+                          value={sv(v.name)}
+                          onChange={e=>updateVan(i,"name",e.target.value)}
+                          onBlur={()=>saveNow("vans")}
+                          disabled={!signedIn}
+                          className="td-in"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          value={sv(v.group)}
+                          onChange={e=>updateVan(i,"group",e.target.value)}
+                          onBlur={()=>saveNow("vans")}
+                          disabled={!signedIn}
+                          className="td-in"
+                          placeholder="ex: BT1"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          value={sv(v.l)}
+                          onChange={e=>updateVan(i,"l",e.target.value)}
+                          onBlur={()=>saveNow("vans")}
+                          disabled={!signedIn}
+                          className="td-in"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          value={sv(v.w)}
+                          onChange={e=>updateVan(i,"w",e.target.value)}
+                          onBlur={()=>saveNow("vans")}
+                          disabled={!signedIn}
+                          className="td-in"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          value={sv(v.h)}
+                          onChange={e=>updateVan(i,"h",e.target.value)}
+                          onBlur={()=>saveNow("vans")}
+                          disabled={!signedIn}
+                          className="td-in"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          value={sv(v.cost)}
+                          onChange={e=>updateVan(i,"cost",e.target.value)}
+                          onBlur={()=>saveNow("vans")}
+                          disabled={costDisabled}
+                          className="td-in td-cost"
+                        />
+                        {isGroup && !isMaster && (
+                          <div style={{ fontSize: 10, opacity: .7 }}>
+                            Coût verrouillé (total du groupe)
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          value={sv(v.maxW)}
+                          onChange={e=>updateVan(i,"maxW",e.target.value)}
+                          onBlur={()=>saveNow("vans")}
+                          disabled={!signedIn}
+                          className="td-in"
+                        />
+                      </td>
+                      <td style={{ textAlign:"right" }}>
+                        <button
+                          onClick={() => {
+                            if (window.confirm("Êtes-vous sûr de vouloir supprimer cette van ?")) {
+                              delVan(i);
+                            }
+                          }}
+                          disabled={!signedIn}
+                          className="btn-xs"
+                        >
+                          Supprimer
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         </div>
       </section>
 
-      {/* BUNDLES — centré + autre couleur */}
+      {/* BUNDLES */}
       <section style={{ display: "grid", placeItems: "center", marginTop: 16 }}>
         <div className="card card-rows">
           <div className="card-head">
             <h2 className="card-title">Bundles</h2>
             <div style={{ flex: 1 }} />
             <button onClick={()=>setShowPaste(true)} disabled={!signedIn} className="btn-sm">Coller (Excel)</button>
-            <button onClick={clearAllRows} disabled={!signedIn || rows.length===0} className="btn-sm">Tout supprimer</button>
+            <button
+              onClick={() => {
+                if (window.confirm("Êtes-vous sûr de vouloir supprimer tous les bundles ?")) {
+                  clearAllRows();
+                }
+              }}
+              disabled={!signedIn || rows.length===0}
+              className="btn-sm"
+            >
+              Tout supprimer
+            </button>
           </div>
 
           {rows.length === 0 && (
@@ -598,12 +889,57 @@ export default function App() {
               <tbody>
                 {rows.map((r, i) => (
                   <tr key={i}>
-                    <td><input value={sv(r.id)}  onChange={e=>updateRow(i,"id",e.target.value)}  onBlur={()=>saveNow("rows")} className="td-in" disabled={!signedIn} /></td>
-                    <td><input type="number" value={sv(r.l)} onChange={e=>updateRow(i,"l",e.target.value)} onBlur={()=>saveNow("rows")} className="td-in" disabled={!signedIn} /></td>
-                    <td><input type="number" value={sv(r.h)} onChange={e=>updateRow(i,"h",e.target.value)} onBlur={()=>saveNow("rows")} className="td-in" disabled={!signedIn} /></td>
-                    <td><input type="number" value={sv(r.wt)} onChange={e=>updateRow(i,"wt",e.target.value)} onBlur={()=>saveNow("rows")} className="td-in" disabled={!signedIn} /></td>
+                    <td>
+                      <input
+                        value={sv(r.id)}
+                        onChange={e=>updateRow(i,"id",e.target.value)}
+                        onBlur={()=>saveNow("rows")}
+                        className="td-in"
+                        disabled={!signedIn}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        value={sv(r.l)}
+                        onChange={e=>updateRow(i,"l",e.target.value)}
+                        onBlur={()=>saveNow("rows")}
+                        className="td-in"
+                        disabled={!signedIn}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        value={sv(r.h)}
+                        onChange={e=>updateRow(i,"h",e.target.value)}
+                        onBlur={()=>saveNow("rows")}
+                        className="td-in"
+                        disabled={!signedIn}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        value={sv(r.wt)}
+                        onChange={e=>updateRow(i,"wt",e.target.value)}
+                        onBlur={()=>saveNow("rows")}
+                        className="td-in"
+                        disabled={!signedIn}
+                      />
+                    </td>
                     <td style={{ textAlign:"right" }}>
-                      <button onClick={()=>delRow(i)} disabled={!signedIn} className="btn-xs">Supprimer</button>
+                      <button
+                        onClick={() => {
+                          if (window.confirm("Êtes-vous sûr de vouloir supprimer ce bundle ?")) {
+                            delRow(i);
+                          }
+                        }}
+                        disabled={!signedIn}
+                        className="btn-xs"
+                      >
+                        Supprimer
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -617,7 +953,7 @@ export default function App() {
         </div>
       </section>
 
-      {/* CALCULER — centré */}
+      {/* CALCULER */}
       <div style={{ display:"grid", placeItems:"center", marginTop: 18 }}>
         <button
           onClick={run}
@@ -628,20 +964,20 @@ export default function App() {
         </button>
       </div>
 
-      {/* RÉSULTATS — centrés */}
+      {/* RÉSULTATS */}
       {result && (
         <section style={{ display:"grid", placeItems:"center", marginTop: 20 }}>
           <div className="card card-results">
             <h2 className="card-title" style={{ marginBottom: 6 }}>Résultats</h2>
             <p className="resum">
-              <b>Vannes utilisées:</b> {result.stats.usedVans} —{" "}
-              <b>Coût total:</b> {Number(computedTotalCost).toLocaleString()} —{" "}
+              <b>Vannes utilisées:</b> {billing.usedVans} —{" "}
+              <b>Coût total:</b> {Number(billing.totalCost).toLocaleString()} —{" "}
               <b>Items non placés (piles restantes):</b> {result.stats.unplacedCount}
             </p>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 16 }}>
               {result.vans.map((v, idx) => {
-                const label = `Vanne ${idx + 1} - ${sv(v.name) || "—"}`;
+                const label = `Vanne ${idx + 1} - ${sv(v.name) || "—"}${v.group ? ` (${v.group})` : ""}`;
                 return (
                   <div key={idx} className="van-card">
                     <div className="van-title">{label}</div>
@@ -661,7 +997,6 @@ export default function App() {
       <ExcelPasteModal open={showPaste} onClose={()=>setShowPaste(false)} onImport={importRows} />
 
       <style>{`
-        /* --- Cartes / alignement --- */
         .card { width: 100%; max-width: 980px; border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; background: #ffffff; box-shadow: 0 6px 16px rgba(0,0,0,.04); }
         .card-head { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
         .card-title { font-size: 16px; margin: 0; }
@@ -669,12 +1004,10 @@ export default function App() {
         .table-wrap { max-width: 980px; margin: 0 auto; }
         .table-wrap.small { max-width: 860px; }
 
-        /* --- Couleurs de cartes pour différencier --- */
-        .card-vans { background: #eef2ff; /* indigo-50 */ border-color: #c7d2fe; }
-        .card-rows { background: #fff7ed; /* orange-50 */ border-color: #fed7aa; }
-        .card-results { background: #f0fdf4; /* green-50 */ border-color: #bbf7d0; }
+        .card-vans { background: #eef2ff; border-color: #c7d2fe; }
+        .card-rows { background: #fff7ed; border-color: #fed7aa; }
+        .card-results { background: #f0fdf4; border-color: #bbf7d0; }
 
-        /* --- Tableaux --- */
         .tbl { border-collapse: collapse; width: 100%; font-size: 12px; line-height: 1.15; overflow: hidden; border-radius: 8px; }
         .tbl th, .tbl td { border: 1px solid #e5e7eb; padding: 6px; }
         .tbl th { text-align: left; font-weight: 700; }
@@ -683,7 +1016,6 @@ export default function App() {
         .tbl tbody tr:nth-child(odd) { background: rgba(255,255,255,.6); }
         .tbl tbody tr:nth-child(even){ background: rgba(255,255,255,.85); }
 
-        /* --- Inputs & boutons --- */
         .td-in { width: 100%; padding: 4px 6px; box-sizing: border-box; font-size: 12px; border: 1px solid #cbd5e1; border-radius: 6px; background: #ffffff; }
         .btn-xs { padding: 4px 8px; font-size: 12px; border-radius: 8px; border: 1px solid #d1d5db; background: #f8fafc; cursor: pointer; }
         .btn-sm { padding: 6px 10px; font-size: 12px; border-radius: 10px; border: 1px solid #c7d2fe; background: #e0e7ff; cursor: pointer; }
@@ -696,20 +1028,25 @@ export default function App() {
         }
         .btn-calc:disabled { background: #cbd5e1; border-color: #94a3b8; cursor: not-allowed; }
 
-        /* --- Résultats --- */
         .resum { margin-top: 4px; font-size: 13px; }
         .van-card { border: 1px solid #cbd5e1; border-radius: 12px; padding: 12px; background: #fff; }
         .van-title { font-weight: 800; margin-bottom: 8px; font-size: 16px; }
         .van-weight { margin-bottom: 8px; font-size: 12px; opacity: .9; }
 
-        /* Inputs "Coût" en jaune */
-        .td-cost { background: #FEF9C3; }           /* amber-100 */
+        .td-cost { background: #FEF9C3; }
         .td-cost:disabled { background: #FEF9C3; opacity: .85; }
       `}</style>
 
-      {/* Messages système (facultatif) */}
-      {loadingFb && <div style={{opacity:.7, fontSize:12, marginTop:8, textAlign:"center"}}>Chargement…</div>}
-      {msg && <div style={{fontSize:12, marginTop:4, color:"#b45309", textAlign:"center"}}>{msg}</div>}
+      {loadingFb && (
+        <div style={{opacity:.7, fontSize:12, marginTop:8, textAlign:"center"}}>
+          Chargement…
+        </div>
+      )}
+      {msg && (
+        <div style={{fontSize:12, marginTop:4, color:"#b45309", textAlign:"center"}}>
+          {msg}
+        </div>
+      )}
     </div>
   );
 }
