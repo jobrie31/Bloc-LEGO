@@ -1,4 +1,5 @@
-#root {
+/* === Styles Vite par défaut fournis === */
+#root { 
   max-width: 1280px;
   margin: 0 auto;
   padding: 2rem;
@@ -11,32 +12,179 @@
   will-change: filter;
   transition: filter 300ms;
 }
-.logo:hover {
-  filter: drop-shadow(0 0 2em #646cffaa);
-}
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafbaa);
-}
+.logo:hover { filter: drop-shadow(0 0 2em #646cffaa); }
+.logo.react:hover { filter: drop-shadow(0 0 2em #61dafbaa); }
 
 @keyframes logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
 }
-
 @media (prefers-reduced-motion: no-preference) {
-  a:nth-of-type(2) .logo {
-    animation: logo-spin infinite 20s linear;
-  }
+  a:nth-of-type(2) .logo { animation: logo-spin infinite 20s linear; }
 }
 
-.card {
-  padding: 2em;
+.card { padding: 2em; } /* compat Vite */
+.read-the-docs { color: #888; }
+
+/* === Styles de l’app === */
+
+.app-container {
+  font-family: system-ui, Arial, sans-serif;
+  padding: 16px;
+  max-width: 1320px;
+  margin: 0 auto;
+  text-align: initial;
 }
 
-.read-the-docs {
-  color: #888;
+.page-title { text-align: center; }
+
+.section-center { display: grid; place-items: center; }
+.mt-10 { margin-top: 10px; }
+.mt-16 { margin-top: 16px; }
+.mt-18 { margin-top: 18px; }
+.mt-20 { margin-top: 20px; }
+.mb-6  { margin-bottom: 6px; }
+.flex-1 { flex: 1; }
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.card-title { font-size: 16px; margin: 0; }
+
+.hint {
+  opacity: .7;
+  font-style: italic;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.table-wrap { max-width: 980px; margin: 0 auto; }
+.table-wrap.small { max-width: 860px; }
+
+/* Base commune pour toutes les cartes */
+.card,
+.card-vans,
+.card-rows,
+.card-results {
+  width: 100%;
+  max-width: 980px;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 12px;
+  background: #ffffff;
+  box-shadow: 0 6px 16px rgba(0,0,0,.04);
+}
+
+/* Variantes */
+.card-vans    { background: #eef2ff; border-color: #c7d2fe; }
+.card-rows    { background: #fff7ed; border-color: #fed7aa; }
+.card-results { background: #f0fdf4; border-color: #bbf7d0; }
+
+/* Tables */
+.tbl {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+  line-height: 1.15;
+  overflow: hidden;
+  border-radius: 8px;
+}
+.tbl th, .tbl td { border: 1px solid #e5e7eb; padding: 6px; }
+.tbl th { text-align: left; font-weight: 700; }
+.tbl-vans thead th { background: #e0e7ff; }
+.tbl-rows thead th { background: #ffedd5; }
+.tbl tbody tr:nth-child(odd)  { background: rgba(255,255,255,.6); }
+.tbl tbody tr:nth-child(even) { background: rgba(255,255,255,.85); }
+
+.td-in {
+  width: 100%;
+  padding: 4px 6px;
+  box-sizing: border-box;
+  font-size: 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+}
+.td-right { text-align: right; }
+
+.btn-xs {
+  padding: 4px 8px;
+  font-size: 12px;
+  border-radius: 8px;
+  border: 1px solid #d1d5db;
+  background: #f8fafc;
+  cursor: pointer;
+}
+.btn-sm {
+  padding: 6px 10px;
+  font-size: 12px;
+  border: 1px solid #c7d2fe;
+  background: #e0e7ff;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.btn-sm:disabled,
+.btn-xs:disabled { opacity: .6; cursor: not-allowed; }
+
+/* Calcul */
+.calc-wrap { display: grid; place-items: center; margin-top: 18px; }
+.btn-calc {
+  font-weight: 800;
+  font-size: 18px;
+  padding: 12px 28px;
+  border-radius: 12px;
+  border: 1px solid #1d4ed8;
+  background: #2563eb;
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(37,99,235,.25);
+}
+.btn-calc:disabled {
+  background: #cbd5e1;
+  border-color: #94a3b8;
+  cursor: not-allowed;
+}
+
+/* Résultats */
+.resum { margin-top: 4px; font-size: 13px; }
+.results-grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
+
+.van-card {
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  padding: 12px;
+  background: #fff;
+}
+.van-title  { font-weight: 800; margin-bottom: 8px; font-size: 16px; }
+.van-weight { margin-bottom: 8px; font-size: 12px; opacity: .9; }
+
+.td-cost { background: #FEF9C3; }
+.td-cost:disabled { background: #FEF9C3; opacity: .85; }
+
+.cost-note { font-size: 10px; opacity: .7; }
+
+/* Actions rows */
+.rows-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* Feedback */
+.loading {
+  opacity: .7;
+  font-size: 12px;
+  margin-top: 8px;
+  text-align: center;
+}
+.message {
+  font-size: 12px;
+  margin-top: 4px;
+  color: #b45309;
+  text-align: center;
 }
