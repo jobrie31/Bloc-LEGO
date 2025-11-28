@@ -14,10 +14,10 @@ const PALETTE = [
   "#6366f1","#84cc16","#06b6d4","#f43f5e","#fb923c","#10a37f","#d946ef","#22c55e"
 ];
 
-const DEFAULT_ITEM_WIDTH = 48;  // largeur fixe de voie (2 voies par van)
+const DEFAULT_ITEM_WIDTH = 48;  // 2 voies / van
 const DEFAULT_ITEM_QTY   = 1;
 
-// ---- Facturation (groupe = pack bi-train, etc.)
+/* ---------------- Facturation ---------------- */
 function calcBillingFromVansList(vansList) {
   let total = 0, usedCount = 0;
   const groups = new Map();
@@ -57,7 +57,7 @@ export default function App(){
   const isNum= (k)=>["l","h","cost","maxW","wt","w"].includes(k);
   const toNum= (x)=>(Number.isFinite(Number(x))?Number(x):0);
 
-  // ---- Fusion des lignes par ID
+  /* ------------- Fusion des lignes par ID ------------- */
   function consolidateRows(list){
     const byId = new Map();
     for (const r of list||[]){
@@ -76,7 +76,7 @@ export default function App(){
     return [...byId.values()].sort((a,b)=>String(a.id).localeCompare(String(b.id)) || b.l-a.l);
   }
 
-  // Couleurs par type
+  /* ------------- Couleurs ------------- */
   const colorMap = useMemo(()=>{
     const types = rows.map(r=>String(r.id??"")).filter(Boolean);
     const uniq  = [...new Set(types)];
@@ -84,7 +84,7 @@ export default function App(){
     return map;
   },[rows]);
 
-  // Infos de groupes (bi-train, etc.)
+  /* ------------- Infos de groupes ------------- */
   const groupInfo = useMemo(()=>{
     const map = new Map();
     vans.forEach((v,idx)=>{
@@ -96,7 +96,7 @@ export default function App(){
     return map;
   },[vans]);
 
-  // ---- Autosave
+  /* ------------- Autosave ------------- */
   const scheduleSave = (kind)=>{
     if(!signedIn||hydratingRef.current[kind]) return;
     if(saveTimersRef.current[kind]) clearTimeout(saveTimersRef.current[kind]);
@@ -121,7 +121,7 @@ export default function App(){
     }
   };
 
-  // ---- CRUD
+  /* ------------- CRUD ------------- */
   function updateVan(i,key,val){
     setVans(prev=>{
       if(key==="cost"){
@@ -161,7 +161,7 @@ export default function App(){
     scheduleSave("rows");
   }
 
-  // ---- Init
+  /* ------------- Init ------------- */
   const LS_KEYS = {vans:"bloclego.vans",rows:"bloclego.rows"};
   useEffect(()=>{(async()=>{
     try{
@@ -187,7 +187,7 @@ export default function App(){
   useEffect(()=>{ try{localStorage.setItem(LS_KEYS.vans,JSON.stringify(vans));}catch{} },[vans]);
   useEffect(()=>{ try{localStorage.setItem(LS_KEYS.rows,JSON.stringify(rows));}catch{} },[rows]);
 
-  // ---- Expansion (1 bundle => 1 item)
+  /* ------------- Expansion (bundles -> items) ------------- */
   function expandItems(){
     const out=[];
     for(const r of rows){
@@ -198,7 +198,7 @@ export default function App(){
     return out;
   }
 
-  // ---- Types de vans normalisés
+  /* ------------- Types de vans ------------- */
   function normalizeTypes(){
     return vans.map((v,i)=>{
       const l=toNum(v.l), w=toNum(v.w), h=toNum(v.h);
@@ -224,7 +224,7 @@ export default function App(){
     }).filter(Boolean);
   }
 
-  // ======= Pas de pré-empilement hauteur: 1 bundle = 1 pile au départ =======
+  /* ------------- Piles initiales ------------- */
   function makeInitialPiles(items){
     return items.map(it=>({
       h: it.h,
@@ -234,7 +234,7 @@ export default function App(){
     })).sort((a,b)=> (b.len - a.len) || (b.h - a.h));
   }
 
-  // ---- Simulation d’une van (2 voies)
+  /* ------------- Simulation 2 voies (meilleure voie / delta min) ------------- */
   function simulateFillOneVan(piles, type, requiredIdxs = null) {
     const Hcap = type.h;
     const Lcap = type.l;
@@ -247,14 +247,13 @@ export default function App(){
     const chosen = new Set();
     let weightUsed = 0;
 
-    function tryPlaceInCol(col, pIdx) {
+    function evaluatePlacement(col, pIdx) {
       const p = piles[pIdx];
-      if (!p) return false;
-      if (p.h > Hcap) return false;
-      if (type.maxW > 0 && (weightUsed + (p.wt || 0)) > type.maxW) return false;
+      if (!p) return null;
+      if (p.h > Hcap) return null;
+      if (type.maxW > 0 && (weightUsed + (p.wt || 0)) > type.maxW) return null;
 
-      // Essayer d'empiler sur une pile existante (sans augmenter la longueur si possible)
-      let best = null;
+      let bestStack = null;
       for (let s = 0; s < col.stacks.length; s++) {
         const st = col.stacks[s];
         if (st.h + p.h <= Hcap) {
@@ -262,60 +261,75 @@ export default function App(){
           const delta  = newLen - st.len;
           const newUsed= col.used + delta;
           if (newUsed <= Lcap) {
-            if (!best || delta < best.delta || (delta === best.delta && newLen < best.newLen)) {
-              best = { sIdx: s, newLen, delta };
+            if (!bestStack || delta < bestStack.delta || (delta === bestStack.delta && newLen < bestStack.newLen)) {
+              bestStack = { sIdx: s, newLen, delta, newUsed };
             }
           }
         }
       }
-      if (best) {
-        const st = col.stacks[best.sIdx];
-        st.h   += p.h;
-        st.len  = best.newLen;
-        st.idxs.push(pIdx);
-        col.used += best.delta;
-        weightUsed += (p.wt || 0);
-        chosen.add(pIdx);
-        return true;
-      }
+      if (bestStack) return { mode:"stack", ...bestStack };
 
-      // Sinon, nouvelle pile dans cette voie
       const newUsed = col.used + p.len;
       if (newUsed <= Lcap) {
-        col.stacks.push({ len: p.len, h: p.h, idxs: [pIdx] });
-        col.used = newUsed;
-        weightUsed += (p.wt || 0);
-        chosen.add(pIdx);
-        return true;
+        return { mode:"new", sIdx: col.stacks.length, newLen: p.len, delta: p.len, newUsed };
       }
-      return false;
+      return null;
+    }
+
+    function applyPlacement(col, pIdx, placement) {
+      const p = piles[pIdx];
+      if (placement.mode === "stack") {
+        const st = col.stacks[placement.sIdx];
+        st.h  += p.h;
+        st.len = placement.newLen;
+        st.idxs.push(pIdx);
+        col.used = placement.newUsed;
+      } else {
+        col.stacks.push({ len: p.len, h: p.h, idxs: [pIdx] });
+        col.used = placement.newUsed;
+      }
+      weightUsed += (p.wt || 0);
+      chosen.add(pIdx);
     }
 
     function placeIdx(pIdx) {
-      const order = cols[0].used <= cols[1].used ? [0, 1] : [1, 0];
-      for (const c of order) if (tryPlaceInCol(cols[c], pIdx)) return true;
-      return false;
+      const candidates = [];
+      for (let c = 0; c < cols.length; c++) {
+        const placement = evaluatePlacement(cols[c], pIdx);
+        if (placement) candidates.push({ colIndex: c, placement });
+      }
+      if (!candidates.length) return false;
+
+      candidates.sort((a,b)=>{
+        const A=a.placement, B=b.placement;
+        if (A.delta!==B.delta) return A.delta-B.delta;           // delta longueur minimal
+        const aIsStack=A.mode==="stack"?0:1, bIsStack=B.mode==="stack"?0:1;
+        if (aIsStack!==bIsStack) return aIsStack-bIsStack;        // préfère empiler
+        if (A.newUsed!==B.newUsed) return A.newUsed-B.newUsed;    // voie qui reste la plus courte
+        return a.colIndex-b.colIndex;
+      });
+
+      const best=candidates[0];
+      applyPlacement(cols[best.colIndex], pIdx, best.placement);
+      return true;
     }
 
-    // Priorité : indices requis (ex: plus longue pile)
     const mustList = Array.isArray(requiredIdxs)
       ? [...requiredIdxs]
       : (requiredIdxs == null ? [] : [requiredIdxs]);
-    mustList.sort((i, j) => (piles[j]?.len || 0) - (piles[i]?.len || 0));
+    mustList.sort((i,j)=>(piles[j]?.len||0)-(piles[i]?.len||0) || (piles[j]?.h||0)-(piles[i]?.h||0));
     for (const idx of mustList) {
       if (!placeIdx(idx)) return { chosen: [], colUsed: [0, 0], weightUsed: 0, plan: cols };
     }
 
-    // Puis le reste, du plus long/haut au plus court
-    const others = [...piles.keys()]
-      .filter(i => !chosen.has(i))
-      .sort((i, j) => (piles[j].len - piles[i].len) || (piles[j].h - piles[i].h));
+    const others = [...piles.keys()].filter(i=>!chosen.has(i))
+      .sort((i,j)=> (piles[j].len-piles[i].len) || (piles[j].h-piles[i].h));
     for (const i of others) placeIdx(i);
 
-    return { chosen: [...chosen], colUsed: cols.map(c => c.used), weightUsed, plan: cols };
+    return { chosen: [...chosen], colUsed: cols.map(c=>c.used), weightUsed, plan: cols };
   }
 
-  // ---- Mise au plan 3D (ordonne du plus long en bas dans chaque pile)
+  /* ------------- Mise en plan 3D ------------- */
   function enforceTallestAtBottom(placed,laneWidth){
     const groups=new Map();
     for(const b of placed){
@@ -376,7 +390,7 @@ export default function App(){
     return {vanObj,remaining};
   }
 
-  // ---- Coût marginal (packs inclus)
+  /* ------------- Coût marginal (packs inclus) ------------- */
   function incrementalBilledCost(vansBuilt, candidateType){
     const groupKey=String(candidateType.group||candidateType.name||"").trim();
     const groupSize=candidateType.groupSize||1;
@@ -387,17 +401,15 @@ export default function App(){
     const packsBefore=Math.ceil(used/groupSize);
     const packsAfter =Math.ceil((used+1)/groupSize);
     const deltaPacks=packsAfter-packsBefore;
-    return deltaPacks * groupSize * costPerVan;
+    return deltaPacks * groupSize * costPerVan; // = coût du pack quand on ouvre
   }
 
-  // ================= SOLVEUR EXACT "BÉTON" =================
-
+  /* ================= Solveur exact + pack bi-train ================= */
   function solveOptimalVans(basePiles, types){
     if(!basePiles.length || !types.length){
       return { stats:{ usedVans:0,totalCost:0,unplacedCount:basePiles.length }, vans:[] };
     }
 
-    // bornes pour le branch & bound
     const maxL = Math.max(...types.map(t=>t.l));
     const minCostPerVan = Math.min(...types.map(t=>t.costPerVan || Infinity));
 
@@ -406,7 +418,6 @@ export default function App(){
 
     function lowerBound(piles, costSoFar){
       if(!piles.length) return costSoFar;
-      // estimation minimale de #vans en se basant sur la longueur totale
       let totalLen = 0;
       for(const p of piles) totalLen += p.len;
       const minVansNeeded = Math.max(1, Math.ceil(totalLen / (2*maxL)));
@@ -415,17 +426,13 @@ export default function App(){
 
     function dfs(piles, vansBuilt, costSoFar){
       if(!piles.length){
-        if(costSoFar < bestCost){
-          bestCost = costSoFar;
-          bestVans = vansBuilt;
-        }
+        if(costSoFar < bestCost){ bestCost = costSoFar; bestVans = vansBuilt; }
         return;
-    }
-
+      }
       if(costSoFar >= bestCost) return;
       if(lowerBound(piles, costSoFar) >= bestCost) return;
 
-      // on force la plus longue pile à être prise par la prochaine vanne
+      // plus longue pile à placer
       let reqIdx=0;
       for(let i=1;i<piles.length;i++){
         if(piles[i].len>piles[reqIdx].len || (piles[i].len===piles[reqIdx].len && piles[i].h>piles[reqIdx].h)) reqIdx=i;
@@ -434,16 +441,37 @@ export default function App(){
       const candidates=[];
       for(const t of types){
         if(piles[reqIdx].h>t.h) continue;
-        const sim=simulateFillOneVan(piles,t,reqIdx);
-        if(!sim.chosen.length) continue;
-        if(t.maxW>0 && (sim.weightUsed||0)<=0) continue;
-        const delta=incrementalBilledCost(vansBuilt,t);
-        const lenPacked=(sim.colUsed?.[0]||0)+(sim.colUsed?.[1]||0);
-        candidates.push({ type:t, sim, delta, lenPacked });
+        const sim1=simulateFillOneVan(piles,t,reqIdx);
+        if(!sim1.chosen.length) continue;
+        if(t.maxW>0 && (sim1.weightUsed||0)<=0) continue;
+
+        const delta1=incrementalBilledCost(vansBuilt,t);
+        const lenPacked1=(sim1.colUsed?.[0]||0)+(sim1.colUsed?.[1]||0);
+
+        // Candidat simple: une vanne
+        candidates.push({
+          type:t, delta:delta1, lenPacked:lenPacked1, simList:[sim1]
+        });
+
+        // Candidat "pack": si on OUVRE un groupe (ex. bi-train), on simule la 2e vanne tout de suite
+        if (t.groupSize>1 && delta1 >= t.groupSize * t.costPerVan - 1e-9) {
+          // on construit temporairement la 1ère pour obtenir piles restantes
+          const built1 = buildVanAndRemove(piles, t, sim1.chosen, sim1.plan);
+          // simule la 2e van (coût marginal 0 si même pack)
+          const sim2 = simulateFillOneVan(built1.remaining, t, null);
+          if (sim2.chosen.length) {
+            const lenPacked2 = (sim2.colUsed?.[0]||0)+(sim2.colUsed?.[1]||0);
+            candidates.push({
+              type:t, delta:delta1,            // coût du pack payé une fois
+              lenPacked:lenPacked1 + lenPacked2,
+              simList:[sim1, sim2]             // on construira 2 vannes d'un coup
+            });
+          }
+        }
       }
       if(!candidates.length) return;
 
-      // explorer d'abord les options les moins chères / qui emballent le plus
+      // On explore d'abord : coût marginal puis quantité emballée
       candidates.sort((a,b)=>{
         if(a.delta!==b.delta) return a.delta-b.delta;
         if(a.lenPacked!==b.lenPacked) return b.lenPacked-a.lenPacked;
@@ -453,30 +481,33 @@ export default function App(){
       for(const cand of candidates){
         const nextCost = costSoFar + cand.delta;
         if(nextCost >= bestCost) continue;
-        const built = buildVanAndRemove(piles, cand.type, cand.sim.chosen, cand.sim.plan);
-        dfs(built.remaining, [...vansBuilt, built.vanObj], nextCost);
+
+        // construit 1 ou 2 vannes selon simList
+        let tmpPiles = JSON.parse(JSON.stringify(piles));
+        let tmpVans  = [...vansBuilt];
+        for (const sim of cand.simList){
+          const built = buildVanAndRemove(tmpPiles, cand.type, sim.chosen, sim.plan);
+          tmpPiles = built.remaining;
+          tmpVans.push(built.vanObj);
+        }
+        dfs(tmpPiles, tmpVans, nextCost);
       }
     }
 
     dfs(JSON.parse(JSON.stringify(basePiles)), [], 0);
 
     if(!bestVans){
-      // fallback très défensif: aucune solution trouvée (devrait être rare)
       return { stats:{ usedVans:0,totalCost:0,unplacedCount:basePiles.length }, vans:[] };
     }
 
     const billing = calcBillingFromVansList(bestVans);
     return {
-      stats:{
-        usedVans: billing.usedVans,
-        totalCost: billing.totalCost,
-        unplacedCount: 0
-      },
+      stats:{ usedVans: billing.usedVans, totalCost: billing.totalCost, unplacedCount: 0 },
       vans: bestVans
     };
   }
 
-  // ---- RUN
+  /* ------------- RUN ------------- */
   function run(){
     const items=expandItems();
     const types=normalizeTypes();
@@ -495,10 +526,10 @@ export default function App(){
     setResult(finalSolution);
   }
 
-  // ---- Billing live
+  /* ------------- Billing live ------------- */
   const billing=useMemo(()=>result?calcBillingFromVansList(result.vans||[]):{totalCost:0,usedVans:0},[result]);
 
-  // ================== UI ==================
+  /* ------------- UI ------------- */
   return (
     <div className="app-container">
       <h1 className="page-title">🧱 Bloc-LEGO – Chargement optimisé</h1>
