@@ -302,10 +302,10 @@ export default function App(){
 
       candidates.sort((a,b)=>{
         const A=a.placement, B=b.placement;
-        if (A.delta!==B.delta) return A.delta-B.delta;           // delta longueur minimal
+        if (A.delta!==B.delta) return A.delta-B.delta;
         const aIsStack=A.mode==="stack"?0:1, bIsStack=B.mode==="stack"?0:1;
-        if (aIsStack!==bIsStack) return aIsStack-bIsStack;        // préfère empiler
-        if (A.newUsed!==B.newUsed) return A.newUsed-B.newUsed;    // voie qui reste la plus courte
+        if (aIsStack!==bIsStack) return aIsStack-bIsStack;
+        if (A.newUsed!==B.newUsed) return A.newUsed-B.newUsed;
         return a.colIndex-b.colIndex;
       });
 
@@ -401,13 +401,22 @@ export default function App(){
     const packsBefore=Math.ceil(used/groupSize);
     const packsAfter =Math.ceil((used+1)/groupSize);
     const deltaPacks=packsAfter-packsBefore;
-    return deltaPacks * groupSize * costPerVan; // = coût du pack quand on ouvre
+    return deltaPacks * groupSize * costPerVan;
   }
 
-  /* ================= Solveur exact + pack bi-train ================= */
+  /* ================= Solveur exact + bi-train avec 2 modèles distincts ================= */
   function solveOptimalVans(basePiles, types){
     if(!basePiles.length || !types.length){
       return { stats:{ usedVans:0,totalCost:0,unplacedCount:basePiles.length }, vans:[] };
+    }
+
+    // Inventaire des membres dans chaque groupe (pour former les paires)
+    const membersByGroup = new Map();
+    for (const t of types){
+      const g = String(t.group||"").trim();
+      if (!g) continue;
+      if (!membersByGroup.has(g)) membersByGroup.set(g, []);
+      membersByGroup.get(g).push(t);
     }
 
     const maxL = Math.max(...types.map(t=>t.l));
@@ -439,57 +448,95 @@ export default function App(){
       }
 
       const candidates=[];
+
       for(const t of types){
         if(piles[reqIdx].h>t.h) continue;
-        const sim1=simulateFillOneVan(piles,t,reqIdx);
-        if(!sim1.chosen.length) continue;
-        if(t.maxW>0 && (sim1.weightUsed||0)<=0) continue;
 
-        const delta1=incrementalBilledCost(vansBuilt,t);
-        const lenPacked1=(sim1.colUsed?.[0]||0)+(sim1.colUsed?.[1]||0);
+        // ----- CAS 1: vanne simple -----
+        if ((t.groupSize||1) <= 1){
+          const sim1 = simulateFillOneVan(piles, t, reqIdx);
+          if(!sim1.chosen.length) continue;
+          if(t.maxW>0 && (sim1.weightUsed||0)<=0) continue;
 
-        // Candidat simple: une vanne
-        candidates.push({
-          type:t, delta:delta1, lenPacked:lenPacked1, simList:[sim1]
-        });
+          const delta1 = incrementalBilledCost(vansBuilt, t);
+          const lenPacked1 = (sim1.colUsed?.[0]||0) + (sim1.colUsed?.[1]||0);
 
-        // Candidat "pack": si on OUVRE un groupe (ex. bi-train), on simule la 2e vanne tout de suite
-        if (t.groupSize>1 && delta1 >= t.groupSize * t.costPerVan - 1e-9) {
-          // on construit temporairement la 1ère pour obtenir piles restantes
-          const built1 = buildVanAndRemove(piles, t, sim1.chosen, sim1.plan);
-          // simule la 2e van (coût marginal 0 si même pack)
-          const sim2 = simulateFillOneVan(built1.remaining, t, null);
-          if (sim2.chosen.length) {
-            const lenPacked2 = (sim2.colUsed?.[0]||0)+(sim2.colUsed?.[1]||0);
-            candidates.push({
-              type:t, delta:delta1,            // coût du pack payé une fois
-              lenPacked:lenPacked1 + lenPacked2,
-              simList:[sim1, sim2]             // on construira 2 vannes d'un coup
-            });
+          candidates.push({
+            typeSeq:[t],
+            delta: delta1,
+            lenPacked: lenPacked1,
+            simList:[sim1]
+          });
+          continue;
+        }
+
+        // ----- CAS 2: bi-train (groupSize == 2) : OBLIGE 2 modèles DISTINCTS -----
+        const gKey = String(t.group||"").trim();
+        const members = (gKey && membersByGroup.get(gKey)) ? membersByGroup.get(gKey) : [];
+        if ((t.groupSize||1) === 2 && members.length >= 2){
+          const mates = members.filter(m => m._index !== t._index);
+          const deltaPack = incrementalBilledCost(vansBuilt, t);
+
+          for (const m of mates){
+            // ordre t -> m
+            const sim1 = simulateFillOneVan(piles, t, reqIdx);
+            if(sim1.chosen.length){
+              const built1 = buildVanAndRemove(piles, t, sim1.chosen, sim1.plan);
+              const sim2   = simulateFillOneVan(built1.remaining, m, null);
+              if(sim2.chosen.length){
+                const len1 = (sim1.colUsed?.[0]||0) + (sim1.colUsed?.[1]||0);
+                const len2 = (sim2.colUsed?.[0]||0) + (sim2.colUsed?.[1]||0);
+                candidates.push({
+                  typeSeq:[t, m],
+                  delta: deltaPack,
+                  lenPacked: len1 + len2,
+                  simList:[sim1, sim2]
+                });
+              }
+            }
+            // ordre m -> t
+            const simA = simulateFillOneVan(piles, m, reqIdx);
+            if(simA.chosen.length){
+              const builtA = buildVanAndRemove(piles, m, simA.chosen, simA.plan);
+              const simB   = simulateFillOneVan(builtA.remaining, t, null);
+              if(simB.chosen.length){
+                const lenA = (simA.colUsed?.[0]||0) + (simA.colUsed?.[1]||0);
+                const lenB = (simB.colUsed?.[0]||0) + (simB.colUsed?.[1]||0);
+                candidates.push({
+                  typeSeq:[m, t],
+                  delta: deltaPack,
+                  lenPacked: lenA + lenB,
+                  simList:[simA, simB]
+                });
+              }
+            }
           }
         }
       }
+
       if(!candidates.length) return;
 
-      // On explore d'abord : coût marginal puis quantité emballée
       candidates.sort((a,b)=>{
         if(a.delta!==b.delta) return a.delta-b.delta;
         if(a.lenPacked!==b.lenPacked) return b.lenPacked-a.lenPacked;
-        return (a.type.costPerVan||0)-(b.type.costPerVan||0);
+        return (a.typeSeq?.[0]?.costPerVan||0) - (b.typeSeq?.[0]?.costPerVan||0);
       });
 
       for(const cand of candidates){
         const nextCost = costSoFar + cand.delta;
         if(nextCost >= bestCost) continue;
 
-        // construit 1 ou 2 vannes selon simList
         let tmpPiles = JSON.parse(JSON.stringify(piles));
         let tmpVans  = [...vansBuilt];
-        for (const sim of cand.simList){
-          const built = buildVanAndRemove(tmpPiles, cand.type, sim.chosen, sim.plan);
+
+        for (let k=0; k<cand.simList.length; k++){
+          const sim = cand.simList[k];
+          const t   = cand.typeSeq[k];
+          const built = buildVanAndRemove(tmpPiles, t, sim.chosen, sim.plan);
           tmpPiles = built.remaining;
           tmpVans.push(built.vanObj);
         }
+
         dfs(tmpPiles, tmpVans, nextCost);
       }
     }
@@ -546,9 +593,6 @@ export default function App(){
           {vans.length===0 && (
             <div className="hint">
               Aucune van. Ajoute une ligne pour commencer.
-              <br/>
-              Pour un <b>bi-train</b> 384+336, mets 2 lignes avec le même <b>Groupe</b> (ou le même Nom)
-              et mets dans <b>Coût</b> le <u>prix total du bi-train</u> (ex: 1100). Le système facture par pack.
             </div>
           )}
 
@@ -569,7 +613,16 @@ export default function App(){
                   return (
                     <tr key={i}>
                       <td><input value={sv(v.name)} onChange={e=>updateVan(i,"name",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in"/></td>
-                      <td><input value={sv(v.group)} onChange={e=>updateVan(i,"group",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in" placeholder="ex: BT384x336"/></td>
+                      <td>
+                        <input
+                          value={sv(v.group)}
+                          onChange={e=>updateVan(i,"group",e.target.value)}
+                          onBlur={()=>saveNow("vans")}
+                          disabled={!signedIn}
+                          className="td-in"
+                          placeholder=""         // <-- placeholder vidé
+                        />
+                      </td>
                       <td><input type="number" value={sv(v.l)} onChange={e=>updateVan(i,"l",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in"/></td>
                       <td><input type="number" value={sv(v.w)} onChange={e=>updateVan(i,"w",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in"/></td>
                       <td><input type="number" value={sv(v.h)} onChange={e=>updateVan(i,"h",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in"/></td>

@@ -2,6 +2,7 @@ import React, { useState } from "react";
 
 /**
  * ExcelPasteModal — Coller depuis Excel/Google Sheets
+ * ⚠️ Préserve l'ordre des lignes telles que collées (aucun tri).
  *
  * Props:
  *  - open: bool
@@ -19,7 +20,7 @@ export default function ExcelPasteModal({ open, onClose, onImport }) {
     try {
       const rows = parseTSV(text);
       if (!rows.length) throw new Error("Aucune donnée détectée.");
-      onImport?.(rows);
+      onImport?.(rows);     // <- renvoie dans l'ordre d'apparition
       onClose?.();
       setText("");
     } catch (e) {
@@ -63,12 +64,12 @@ export default function ExcelPasteModal({ open, onClose, onImport }) {
   );
 }
 
-// ---------- Helpers parsing ----------
+/* ================= Helpers parsing (préserve l'ordre) ================= */
 
 function parseTSV(raw) {
   if (!raw) return [];
-  // Normalise \r\n et convertit CSV FR ';' -> \t
-  let txt = raw.replace(/\r\n?/g, "\n");
+  // Nettoyage: BOM, normalise fins de ligne, convertit CSV FR ';' en tab
+  let txt = String(raw).replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
   const looksLikeCsv = /;/.test(txt) && !/\t/.test(txt);
   if (looksLikeCsv) txt = txt.replace(/;/g, "\t");
 
@@ -77,6 +78,7 @@ function parseTSV(raw) {
 
   const cells0 = splitRow(lines[0]);
   const hasHeader = isHeaderRow(cells0);
+
   let start = 0;
   let headerMap;
   if (hasHeader) {
@@ -91,12 +93,13 @@ function parseTSV(raw) {
     const cells = splitRow(lines[i]);
     if (cells.length === 0) continue;
     const row = extractRow(cells, headerMap);
-    if (row) out.push(row);
+    if (row) out.push(row); // ⚠️ On push dans l'ordre — aucun tri ici
   }
   return out;
 }
 
 function splitRow(line) {
+  // Séparateur = tab en dehors des guillemets
   const parts = [];
   let cur = "";
   let inQ = false;
@@ -107,12 +110,13 @@ function splitRow(line) {
     cur += ch;
   }
   parts.push(cur);
-  return parts.map((s) => s.trim());
+  // Trim doux: supprime espaces non-breakings & trims
+  return parts.map((s) => String(s).replace(/\u00A0/g, " ").trim());
 }
 
 function isHeaderRow(cells) {
   const joined = cells.join(" ").toLowerCase();
-  const keys = ["id","longueur","length"," l","l ","hauteur","height"," h","h ","poids","weight","wt"];
+  const keys = ["id","longueur","length"," l","l ","hauteur","height"," h","h ","poids","weight","wt","x","z"];
   return keys.some((k) => joined.includes(k));
 }
 
@@ -130,10 +134,10 @@ function buildHeaderMap(cells) {
   const idx = { id: -1, l: -1, h: -1, wt: -1 };
   cells.forEach((c, i) => {
     const k = norm(c);
-    if (["id", "code", "type", "moulure"].includes(k)) idx.id = i;
-    else if (["l", "longueur", "length", "x"].includes(k)) idx.l = i;
-    else if (["h", "hauteur", "height", "z"].includes(k)) idx.h = i;
-    else if (["poids", "weight", "wt", "kg", "lb"].includes(k)) idx.wt = i;
+    if (["id","code","type","moulure"].includes(k)) idx.id = i;
+    else if (["l","longueur","length","x"].includes(k)) idx.l = i;
+    else if (["h","hauteur","height","z"].includes(k)) idx.h = i;
+    else if (["poids","weight","wt","kg","lb"].includes(k)) idx.wt = i;
   });
   const base = defaultHeaderMap(cells.length);
   return {
@@ -150,7 +154,13 @@ function norm(s) {
 
 function toNum(x) {
   if (x === null || x === undefined) return 0;
-  const s = String(x).replace(/,/, ".").replace(/[^0-9.+-]/g, "");
+  // Supporte décimale française (virgule), supprime espaces et séparateurs de milliers
+  const s = String(x)
+    .replace(/\u00A0/g, " ")   // NBSP -> space
+    .replace(/\s+/g, "")       // enlève espaces
+    .replace(/\./g, "")        // enlève milliers au point "1.234,56"
+    .replace(/,/g, ".")        // virgule -> point
+    .replace(/[^0-9.+-]/g, ""); // garde chiffres/signes/point
   const n = Number(s);
   return Number.isFinite(n) ? n : 0;
 }
@@ -158,12 +168,15 @@ function toNum(x) {
 function extractRow(cells, map) {
   const safe = (i) => (i >= 0 && i < cells.length ? cells[i] : "");
   const id = String(safe(map.id)).trim();
-  const l = toNum(safe(map.l));
-  const h = toNum(safe(map.h));
+  const l  = toNum(safe(map.l));
+  const h  = toNum(safe(map.h));
   const wt = toNum(safe(map.wt));
-  if (!id && !(l && h)) return null; // ligne vide
+  // Si aucune info utile, ignorer la ligne
+  if (!id && !(l && h)) return null;
   return { id, l, h, wt };
 }
+
+/* ================= Styles ================= */
 
 const styles = {
   backdrop: {

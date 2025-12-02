@@ -1,10 +1,21 @@
 <!doctype html>
-<html lang="en">
+<html lang="fr">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+
+    <!-- Favicon desktop (SVG OK) -->
+    <link rel="icon" type="image/svg+xml" href="/lego.svg" />
+    <!-- Fallback PNG (certains navigateurs) -->
+    <link rel="icon" type="image/png" sizes="32x32" href="/lego-32.png" />
+
+    <!-- iOS / iPadOS (PNG requis) -->
+    <link rel="apple-touch-icon" href="/lego-192.png" />
+
+    <!-- PWA (si tu as un manifest) -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>bloc-lego</title>
+    <title>Bloc-LEGO</title>
   </head>
   <body>
     <div id="root"></div>

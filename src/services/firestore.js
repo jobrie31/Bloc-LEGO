@@ -4,8 +4,8 @@ import {
 import { db, auth } from "../lib/firebase";
 
 // Emplacements
-const DOC_VANS     = doc(db, "settings", "vans");
-const DOC_MOULURES = doc(db, "moulures", "default");
+const DOC_VANS     = doc(db, "settings", "vans");      // { list: Van[] }
+const DOC_MOULURES = doc(db, "moulures", "default");   // { rows: Row[] }
 const COL_RUNS     = "runs";
 
 // Helpers
@@ -21,31 +21,33 @@ export async function loadVans() {
   if (!snap.exists()) return [];
   const data = snap.data();
   const list = Array.isArray(data.list) ? data.list : [];
-  // Normalisation simple
+  // Normalisation — ⚠️ on conserve 'group'
   return list.map(v => ({
-    name: String(v.name ?? ""),
-    l: v.l ?? null,
-    w: v.w ?? null,
-    h: v.h ?? null,
-    cost: v.cost ?? null,
-    maxW: v.maxW ?? null, // poids max
+    name:  String(v.name  ?? ""),
+    group: String(v.group ?? ""),   // <--- ajouté
+    l:     v.l     ?? null,
+    w:     v.w     ?? null,
+    h:     v.h     ?? null,
+    cost:  v.cost  ?? null,
+    maxW:  v.maxW  ?? null,         // poids max
   }));
 }
 
 export async function saveVans(vansArray) {
   const list = (Array.isArray(vansArray) ? vansArray : []).map(v => ({
-    name: String(v.name ?? ""),
-    l: numOrNull(v.l),
-    w: numOrNull(v.w),
-    h: numOrNull(v.h),
-    cost: numOrNull(v.cost),
-    maxW: numOrNull(v.maxW),
+    name:  String(v?.name  ?? ""),
+    group: String(v?.group ?? "").trim(),  // <--- ajouté
+    l:     numOrNull(v?.l),
+    w:     numOrNull(v?.w),
+    h:     numOrNull(v?.h),
+    cost:  numOrNull(v?.cost),
+    maxW:  numOrNull(v?.maxW),
   }));
   await setDoc(DOC_VANS, {
     list,
     updatedAt: serverTimestamp(),
     uid: auth.currentUser?.uid || null,
-  }, { merge: false });
+  }, { merge: true }); // <--- passe à merge:true pour ne pas écraser d'autres champs
 }
 
 // --------- MOULURES (1 doc: moulures/default)
@@ -54,27 +56,27 @@ export async function loadMoulures() {
   if (!snap.exists()) return [];
   const data = snap.data();
   const rows = Array.isArray(data.rows) ? data.rows : [];
-  // Nouveau format: id, l, h, wt (on ignore anciens champs s’ils existent)
+  // Nouveau format: id, l, h, wt
   return rows.map(r => ({
     id: String(r.id ?? ""),
-    l: r.l ?? null,
-    h: r.h ?? null,
+    l:  r.l  ?? null,
+    h:  r.h  ?? null,
     wt: r.wt ?? null, // poids/unité
   }));
 }
 
 export async function saveMoulures(rows) {
   const out = (Array.isArray(rows) ? rows : []).map(r => ({
-    id: String(r.id ?? ""),
-    l: numOrNull(r.l),
-    h: numOrNull(r.h),
-    wt: numOrNull(r.wt), // poids/unité
+    id: String(r?.id ?? ""),
+    l:  numOrNull(r?.l),
+    h:  numOrNull(r?.h),
+    wt: numOrNull(r?.wt), // poids/unité
   }));
   await setDoc(DOC_MOULURES, {
     rows: out,
     updatedAt: serverTimestamp(),
     uid: auth.currentUser?.uid || null,
-  }, { merge: false });
+  }, { merge: true }); // idem: merge:true
 }
 
 // --------- RUNS (log résultat)
