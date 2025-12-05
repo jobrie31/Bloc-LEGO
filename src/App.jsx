@@ -1,14 +1,17 @@
+// src/App.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import View3D from "./components/View3D";
 import ExcelPasteModal from "./components/ExcelPasteModal";
-import { ensureSignedIn } from "./lib/firebase";
+import Login from "./Login";
+import { getAuth, onAuthStateChanged } from "firebase/auth";
 import { loadVans, saveVans, loadMoulures, saveMoulures } from "./services/firestore";
+import TrajetsMenu from "./components/TrajetsMenu"; // ← panneau de gestion des trajets
 import "./app.css";
 
 const PALETTE = [
   "#2563eb","#16a34a","#dc2626","#f59e0b","#9333ea","#0ea5e9","#ef4444","#10b981",
   "#f97316","#a855f7","#14b8a6","#e11d48","#1f2937","#64748b","#059669","#d97706",
-  "#7c3aed","#16a085","#c0392b","#8e44ad","#2980b9","#2ecc71","#e67e22",
+  "#7c3aed","#16a085","#8e44ad","#2980b9","#2ecc71","#e67e22",
   "#e84393","#00cec9","#6c5ce7","#fdcb6e","#e17055","#0984e3","#00b894","#2d3436",
   "#ff7675","#74b9ff","#55efc4","#ffeaa7","#fab1a0","#81ecec","#b2bec3","#a29bfe",
   "#6366f1","#84cc16","#06b6d4","#f43f5e","#fb923c","#10a37f","#d946ef","#22c55e"
@@ -19,6 +22,8 @@ const DEFAULT_ITEM_QTY   = 1;
 
 /* ---------------- Facturation ---------------- */
 function calcBillingFromVansList(vansList) {
+  // totalCost = coût avec packs (bi-trains)
+  // usedVans  = nombre de packs (un bi-train compte pour 1)
   let total = 0, usedCount = 0;
   const groups = new Map();
   for (const v of (vansList||[])) {
@@ -35,7 +40,7 @@ function calcBillingFromVansList(vansList) {
   for (const [,g] of groups) {
     const packs = Math.ceil(g.used / g.groupSize);
     total     += packs * (g.costPerVan * g.groupSize);
-    usedCount += packs * g.groupSize;
+    usedCount += packs; // 1 pack = 1 van utilisée
   }
   return { totalCost: total, usedVans: usedCount };
 }
@@ -47,6 +52,7 @@ export default function App(){
   const [loadingFb, setLoadingFb] = useState(false);
   const [msg, setMsg] = useState("");
   const [signedIn, setSignedIn] = useState(false);
+  const [user, setUser] = useState(null);
   const [showPaste, setShowPaste] = useState(false);
 
   const [autosave, setAutosave] = useState({vans:"idle",rows:"idle",vansAt:null,rowsAt:null,vansErr:"",rowsErr:""});
@@ -124,6 +130,7 @@ export default function App(){
   /* ------------- CRUD ------------- */
   function updateVan(i,key,val){
     setVans(prev=>{
+      // champ coût propagé dans le groupe
       if(key==="cost"){
         const target=prev[i]; if(!target) return prev;
         const groupKey=String(target.group||target.name||"").trim();
@@ -134,11 +141,15 @@ export default function App(){
           return (k===groupKey)?{...vv,cost:newCost}:vv;
         });
       }
+      // enabled: pas de coercition numérique
+      if(key==="enabled"){
+        return prev.map((x,idx)=>idx===i?{...x,enabled:!!val}:x);
+      }
       return prev.map((x,idx)=>idx===i?{...x,[key]:isNum(key)?(val===""?"":val):val}:x);
     });
     scheduleSave("vans");
   }
-  function addVan(){ setVans(v=>[...v,{name:"",group:"",l:"",w:"",h:"",cost:"",maxW:""}]); scheduleSave("vans"); }
+  function addVan(){ setVans(v=>[...v,{enabled:true,name:"",group:"",l:"",w:"",h:"",cost:"",maxW:""}]); scheduleSave("vans"); }
   function delVan(i){ setVans(v=>v.filter((_,idx)=>idx!==i)); scheduleSave("vans"); }
 
   function updateRow(i,key,val){
@@ -161,29 +172,61 @@ export default function App(){
     scheduleSave("rows");
   }
 
-  /* ------------- Init ------------- */
+  /* ------------- Init (auth + chargement par utilisateur) ------------- */
   const LS_KEYS = {vans:"bloclego.vans",rows:"bloclego.rows"};
-  useEffect(()=>{(async()=>{
-    try{
-      await ensureSignedIn(); setSignedIn(true);
+  useEffect(()=>{
+    const auth = getAuth();
+    const unsub = onAuthStateChanged(auth, async (u) => {
+      setUser(u);
+      setSignedIn(!!u);
+
+      if (!u) { // déconnexion
+        setVans([]); setRows([]); setResult(null); setLoadingFb(false);
+        return;
+      }
+
       let lsV=null, lsR=null;
-      try{ lsV=JSON.parse(localStorage.getItem(LS_KEYS.vans)||"null"); lsR=JSON.parse(localStorage.getItem(LS_KEYS.rows)||"null"); }catch{}
+      try{
+        lsV=JSON.parse(localStorage.getItem(LS_KEYS.vans)||"null");
+        lsR=JSON.parse(localStorage.getItem(LS_KEYS.rows)||"null");
+      }catch{}
+
       if(Array.isArray(lsV)) setVans(lsV);
       if(Array.isArray(lsR)) setRows(consolidateRows(lsR));
+
       setLoadingFb(true); hydratingRef.current.vans=true; hydratingRef.current.rows=true;
-      const [arrV,arrR]=await Promise.all([loadVans(),loadMoulures()]);
-      const convRows=(arrR||[]).map(r=>({id:String(r.id||""),l:toNum(r.l),h:toNum(r.h),wt:toNum(r.wt)}));
-      if(Array.isArray(arrV)&&arrV.length>0){ setVans(arrV); } else if(Array.isArray(lsV)&&lsV.length>0&&signedIn){ saveVans(lsV).catch(()=>{}); }
-      if(Array.isArray(convRows)&&convRows.length>0){
-        setRows(prev=>(prev&&prev.length>0?prev:consolidateRows(convRows)));
-      } else if(Array.isArray(lsR)&&lsR.length>0&&signedIn){ saveMoulures(consolidateRows(lsR)).catch(()=>{}); }
-    }catch(e){ setMsg("Erreur d’authentification ou de chargement initial."); }
-    finally{ hydratingRef.current.vans=false; hydratingRef.current.rows=false; setLoadingFb(false); }
-  })();
+
+      try{
+        const [arrV,arrR]=await Promise.all([loadVans(), loadMoulures()]);
+        const convRows=(arrR||[]).map(r=>({id:String(r.id||""),l:toNum(r.l),h:toNum(r.h),wt:toNum(r.wt)}));
+
+        if(Array.isArray(arrV)&&arrV.length>0){
+          // si des vans arrivent sans 'enabled', on les active par défaut
+          setVans(arrV.map(v => ("enabled" in v ? v : { ...v, enabled:true })));
+        } else if(Array.isArray(lsV)&&lsV.length>0){
+          saveVans(lsV).catch(()=>{});
+        }
+
+        if(Array.isArray(convRows)&&convRows.length>0){
+          setRows(prev=>(prev&&prev.length>0?prev:consolidateRows(convRows)));
+        } else if(Array.isArray(lsR)&&lsR.length>0){
+          saveMoulures(consolidateRows(lsR)).catch(()=>{});
+        }
+      } catch(e){
+        setMsg("Erreur d’authentification ou de chargement initial.");
+      } finally{
+        hydratingRef.current.vans=false; hydratingRef.current.rows=false; setLoadingFb(false);
+      }
+    });
+
     const handleBeforeUnload=()=>{ flushPendingSaves(); };
     window.addEventListener("beforeunload",handleBeforeUnload);
-    return ()=>window.removeEventListener("beforeunload",handleBeforeUnload);
+    return ()=>{
+      window.removeEventListener("beforeunload",handleBeforeUnload);
+      unsub();
+    };
   },[]);
+
   useEffect(()=>{ try{localStorage.setItem(LS_KEYS.vans,JSON.stringify(vans));}catch{} },[vans]);
   useEffect(()=>{ try{localStorage.setItem(LS_KEYS.rows,JSON.stringify(rows));}catch{} },[rows]);
 
@@ -200,28 +243,30 @@ export default function App(){
 
   /* ------------- Types de vans ------------- */
   function normalizeTypes(){
-    return vans.map((v,i)=>{
-      const l=toNum(v.l), w=toNum(v.w), h=toNum(v.h);
-      if(!(l>0&&w>0&&h>0)) return null;
-      const groupKey=String(v.group||v.name||"").trim();
-      const info=groupKey?groupInfo.get(groupKey):null;
-      const groupSize = info?.count ?? 1;
-      let groupCostTotal;
-      if(groupSize>1 && info){ const master=vans[info.firstIdx]||v; groupCostTotal=toNum(master.cost); }
-      else{ groupCostTotal=toNum(v.cost); }
-      const costPerVan = groupSize>1 ? (groupCostTotal/groupSize||0) : groupCostTotal;
-      return {
-        code:String((v.name||"").trim())||`van_${i+1}`,
-        name:String(v.name||""),
-        group:groupKey,
-        l,w,h,
-        costPerVan,
-        groupSize,
-        groupCostTotal,
-        maxW: toNum(v.maxW),
-        _index: i,
-      };
-    }).filter(Boolean);
+    return vans
+      .filter(v => v.enabled !== false) // seulement celles cochées
+      .map((v,i)=>{
+        const l=toNum(v.l), w=toNum(v.w), h=toNum(v.h);
+        if(!(l>0&&w>0&&h>0)) return null;
+        const groupKey=String(v.group||v.name||"").trim();
+        const info=groupKey?groupInfo.get(groupKey):null;
+        const groupSize = info?.count ?? 1;
+        let groupCostTotal;
+        if(groupSize>1 && info){ const master=vans[info.firstIdx]||v; groupCostTotal=toNum(master.cost); }
+        else{ groupCostTotal=toNum(v.cost); }
+        const costPerVan = groupSize>1 ? (groupCostTotal/groupSize||0) : groupCostTotal;
+        return {
+          code:String((v.name||"").trim())||`van_${i+1}`,
+          name:String(v.name||""),
+          group:groupKey,
+          l,w,h,
+          costPerVan,
+          groupSize,
+          groupCostTotal,
+          maxW: toNum(v.maxW),
+          _index: i,
+        };
+      }).filter(Boolean);
   }
 
   /* ------------- Piles initiales ------------- */
@@ -404,13 +449,13 @@ export default function App(){
     return deltaPacks * groupSize * costPerVan;
   }
 
-  /* ================= Solveur exact + bi-train avec 2 modèles distincts ================= */
+  /* ================= Solveur exact + bi-train avec 2 modèles distincts + remorque vide ================= */
   function solveOptimalVans(basePiles, types){
     if(!basePiles.length || !types.length){
       return { stats:{ usedVans:0,totalCost:0,unplacedCount:basePiles.length }, vans:[] };
     }
 
-    // Inventaire des membres dans chaque groupe (pour former les paires)
+    // membres par groupe (pour paires)
     const membersByGroup = new Map();
     for (const t of types){
       const g = String(t.group||"").trim();
@@ -420,17 +465,19 @@ export default function App(){
     }
 
     const maxL = Math.max(...types.map(t=>t.l));
+    const Hmax = Math.max(...types.map(t=>t.h));
     const minCostPerVan = Math.min(...types.map(t=>t.costPerVan || Infinity));
 
     let bestCost = Infinity;
     let bestVans = null;
 
+    // --------- BORNE INFÉRIEURE (surface L×H) ---------
     function lowerBound(piles, costSoFar){
       if(!piles.length) return costSoFar;
-      let totalLen = 0;
-      for(const p of piles) totalLen += p.len;
-      const minVansNeeded = Math.max(1, Math.ceil(totalLen / (2*maxL)));
-      return costSoFar + minVansNeeded * minCostPerVan;
+      let totalArea = 0;
+      for (const p of piles) totalArea += (p.len * p.h);
+      const vansByArea = Math.max(1, Math.ceil(totalArea / (2 * maxL * Hmax)));
+      return costSoFar + vansByArea * minCostPerVan;
     }
 
     function dfs(piles, vansBuilt, costSoFar){
@@ -441,7 +488,7 @@ export default function App(){
       if(costSoFar >= bestCost) return;
       if(lowerBound(piles, costSoFar) >= bestCost) return;
 
-      // plus longue pile à placer
+      // plus longue pile
       let reqIdx=0;
       for(let i=1;i<piles.length;i++){
         if(piles[i].len>piles[reqIdx].len || (piles[i].len===piles[reqIdx].len && piles[i].h>piles[reqIdx].h)) reqIdx=i;
@@ -452,7 +499,7 @@ export default function App(){
       for(const t of types){
         if(piles[reqIdx].h>t.h) continue;
 
-        // ----- CAS 1: vanne simple -----
+        // ----- CAS 1: van simple -----
         if ((t.groupSize||1) <= 1){
           const sim1 = simulateFillOneVan(piles, t, reqIdx);
           if(!sim1.chosen.length) continue;
@@ -470,7 +517,7 @@ export default function App(){
           continue;
         }
 
-        // ----- CAS 2: bi-train (groupSize == 2) : OBLIGE 2 modèles DISTINCTS -----
+        // ----- CAS 2: bi-train (groupSize == 2) — autoriser 2e remorque VIDE -----
         const gKey = String(t.group||"").trim();
         const members = (gKey && membersByGroup.get(gKey)) ? membersByGroup.get(gKey) : [];
         if ((t.groupSize||1) === 2 && members.length >= 2){
@@ -483,14 +530,15 @@ export default function App(){
             if(sim1.chosen.length){
               const built1 = buildVanAndRemove(piles, t, sim1.chosen, sim1.plan);
               const sim2   = simulateFillOneVan(built1.remaining, m, null);
-              if(sim2.chosen.length){
+              if (sim2.chosen.length || built1.remaining.length === 0){
                 const len1 = (sim1.colUsed?.[0]||0) + (sim1.colUsed?.[1]||0);
                 const len2 = (sim2.colUsed?.[0]||0) + (sim2.colUsed?.[1]||0);
                 candidates.push({
                   typeSeq:[t, m],
                   delta: deltaPack,
                   lenPacked: len1 + len2,
-                  simList:[sim1, sim2]
+                  simList: sim2.chosen.length ? [sim1, sim2]
+                        : [sim1, { chosen:[], colUsed:[0,0], weightUsed:0, plan:[{stacks:[],used:0},{stacks:[],used:0}], _forceType: m }]
                 });
               }
             }
@@ -499,14 +547,15 @@ export default function App(){
             if(simA.chosen.length){
               const builtA = buildVanAndRemove(piles, m, simA.chosen, simA.plan);
               const simB   = simulateFillOneVan(builtA.remaining, t, null);
-              if(simB.chosen.length){
+              if (simB.chosen.length || builtA.remaining.length === 0){
                 const lenA = (simA.colUsed?.[0]||0) + (simA.colUsed?.[1]||0);
                 const lenB = (simB.colUsed?.[0]||0) + (simB.colUsed?.[1]||0);
                 candidates.push({
                   typeSeq:[m, t],
                   delta: deltaPack,
                   lenPacked: lenA + lenB,
-                  simList:[simA, simB]
+                  simList: simB.chosen.length ? [simA, simB]
+                        : [simA, { chosen:[], colUsed:[0,0], weightUsed:0, plan:[{stacks:[],used:0},{stacks:[],used:0}], _forceType: t }]
                 });
               }
             }
@@ -532,6 +581,15 @@ export default function App(){
         for (let k=0; k<cand.simList.length; k++){
           const sim = cand.simList[k];
           const t   = cand.typeSeq[k];
+
+          // Si _forceType est présent, on doit ajouter la 2e van du pack même vide
+          if (sim.chosen.length === 0 && sim._forceType){
+            const builtEmpty = buildVanAndRemove(tmpPiles, sim._forceType, [], sim.plan);
+            tmpPiles = builtEmpty.remaining; // inchangé
+            tmpVans.push(builtEmpty.vanObj);
+            continue;
+          }
+
           const built = buildVanAndRemove(tmpPiles, t, sim.chosen, sim.plan);
           tmpPiles = built.remaining;
           tmpVans.push(built.vanObj);
@@ -581,125 +639,180 @@ export default function App(){
     <div className="app-container">
       <h1 className="page-title">🧱 Bloc-LEGO – Chargement optimisé</h1>
 
-      {/* VANS */}
-      <section className="section-center mt-10">
-        <div className="card card-vans">
-          <div className="card-head">
-            <h2 className="card-title">Vans</h2>
-            <div className="flex-1" />
-            <button onClick={addVan} disabled={!signedIn} className="btn-sm">+ Ajouter une van</button>
-          </div>
-
-          {vans.length===0 && (
-            <div className="hint">
-              Aucune van. Ajoute une ligne pour commencer.
-            </div>
-          )}
-
-          <div className="table-wrap">
-            <table className="tbl tbl-vans">
-              <thead>
-                <tr>
-                  <th>Nom</th><th>Groupe (optionnel)</th><th>Longueur X</th><th>Largeur Y</th><th>Hauteur Z</th><th>Coût (total groupe)</th><th>Poids max</th><th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {vans.map((v,i)=>{
-                  const key=String(v.group||v.name||"").trim();
-                  const info=key?groupInfo.get(key):null;
-                  const isGroup=info&&info.count>1;
-                  const isMaster=!isGroup || (info && info.firstIdx===i);
-                  const costDisabled = !signedIn || !isMaster;
-                  return (
-                    <tr key={i}>
-                      <td><input value={sv(v.name)} onChange={e=>updateVan(i,"name",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in"/></td>
-                      <td>
-                        <input
-                          value={sv(v.group)}
-                          onChange={e=>updateVan(i,"group",e.target.value)}
-                          onBlur={()=>saveNow("vans")}
-                          disabled={!signedIn}
-                          className="td-in"
-                          placeholder=""         // <-- placeholder vidé
-                        />
-                      </td>
-                      <td><input type="number" value={sv(v.l)} onChange={e=>updateVan(i,"l",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in"/></td>
-                      <td><input type="number" value={sv(v.w)} onChange={e=>updateVan(i,"w",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in"/></td>
-                      <td><input type="number" value={sv(v.h)} onChange={e=>updateVan(i,"h",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in"/></td>
-                      <td>
-                        <input type="number" value={sv(v.cost)} onChange={e=>updateVan(i,"cost",e.target.value)} onBlur={()=>saveNow("vans")} disabled={costDisabled} className="td-in td-cost"/>
-                        {isGroup && !isMaster && (<div className="cost-note">Coût verrouillé (total du groupe)</div>)}
-                      </td>
-                      <td><input type="number" value={sv(v.maxW)} onChange={e=>updateVan(i,"maxW",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in"/></td>
-                      <td className="td-right"><button onClick={()=>{ if(window.confirm("Êtes-vous sûr de vouloir supprimer cette van ?")) delVan(i); }} disabled={!signedIn} className="btn-xs">Supprimer</button></td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+      {/* barre utilisateur en haut à droite */}
+      {signedIn && (
+        <div className="userbar">
+          <span className="user-email">{user?.email}</span>
+          <button className="btn-xs" onClick={()=>getAuth().signOut()}>Déconnecter</button>
         </div>
-      </section>
+      )}
 
-      {/* BUNDLES */}
-      <section className="section-center mt-16">
-        <div className="card card-rows">
-          <div className="card-head">
-            <h2 className="card-title">Bundles</h2>
-            <div className="flex-1" />
-            <button onClick={()=>setShowPaste(true)} disabled={!signedIn} className="btn-sm">Coller (Excel)</button>
-            <button onClick={()=>{ if(window.confirm("Êtes-vous sûr de vouloir supprimer tous les bundles ?")) clearAllRows(); }} disabled={!signedIn||rows.length===0} className="btn-sm">Tout supprimer</button>
-          </div>
+      {!signedIn && (
+        <Login user={user} onSignedIn={()=>{}} />
+      )}
 
-          {rows.length===0 && (<div className="hint">Aucun bundle. Ajoute une ligne ou colle depuis Excel.</div>)}
+      {signedIn && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "minmax(280px, 320px) 1fr",
+            gap: 16,
+            alignItems: "start",
+            marginTop: 10
+          }}
+        >
+          {/* --- Colonne gauche : Trajets --- */}
+          <TrajetsMenu
+            signedIn={signedIn}
+            user={user}
+            vans={vans}
+            rows={rows}
+            result={result}
+            billing={billing}
+          />
 
-          <div className="table-wrap small">
-            <table className="tbl tbl-rows">
-              <thead><tr><th>ID</th><th>L (X)</th><th>H (Z)</th><th>Poids/unité</th><th></th></tr></thead>
-              <tbody>
-                {rows.map((r,i)=>(
-                  <tr key={i}>
-                    <td><input value={sv(r.id)} onChange={e=>updateRow(i,"id",e.target.value)} onBlur={()=>saveNow("rows")} className="td-in" disabled={!signedIn}/></td>
-                    <td><input type="number" value={sv(r.l)} onChange={e=>updateRow(i,"l",e.target.value)} onBlur={()=>saveNow("rows")} className="td-in" disabled={!signedIn}/></td>
-                    <td><input type="number" value={sv(r.h)} onChange={e=>updateRow(i,"h",e.target.value)} onBlur={()=>saveNow("rows")} className="td-in" disabled={!signedIn}/></td>
-                    <td><input type="number" value={sv(r.wt)} onChange={e=>updateRow(i,"wt",e.target.value)} onBlur={()=>saveNow("rows")} className="td-in" disabled={!signedIn}/></td>
-                    <td className="td-right"><button onClick={()=>{ if(window.confirm("Êtes-vous sûr de vouloir supprimer ce bundle ?")) delRow(i); }} disabled={!signedIn} className="btn-xs">Supprimer</button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <div className="rows-actions">
-              <button onClick={addRow} disabled={!signedIn} className="btn-sm">+ Ajouter une ligne</button>
-            </div>
-          </div>
-        </div>
-      </section>
+          {/* --- Colonne droite : Application principale --- */}
+          <div>
+            {/* VANS */}
+            <section className="section-center mt-10">
+              <div className="card card-vans">
+                <div className="card-head">
+                  <h2 className="card-title">Vans</h2>
+                  <div className="flex-1" />
+                  <button onClick={addVan} disabled={!signedIn} className="btn-sm">+ Ajouter une van</button>
+                </div>
 
-      {/* CALCUL */}
-      <div className="calc-wrap">
-        <button onClick={run} disabled={vans.length===0||rows.length===0} className="btn-calc">CALCULER</button>
-      </div>
-
-      {/* RÉSULTATS */}
-      {result&&(
-        <section className="section-center mt-20">
-          <div className="card card-results">
-            <h2 className="card-title mb-6">Résultats</h2>
-            <p className="resum"><b>Vannes utilisées:</b> {billing.usedVans} — <b>Coût total:</b> {Number(billing.totalCost).toLocaleString()} — <b>Piles restantes:</b> {result.stats.unplacedCount}</p>
-            <div className="results-grid">
-              {result.vans.map((v,idx)=>{
-                const label=`Vanne ${idx+1} - ${sv(v.name)||"—"}${v.group?` (${v.group})`:""}`;
-                return (
-                  <div key={idx} className="van-card">
-                    <div className="van-title">{label}</div>
-                    <div className="van-weight">Poids: <b>{Number(v.weightUsed||0).toLocaleString()}</b>{v.maxWeight?<> / <b>{Number(v.maxWeight).toLocaleString()}</b></>:null}</div>
-                    <View3D van={v} colorMap={colorMap} height={380} vanLabel={label}/>
+                {vans.length===0 && (
+                  <div className="hint">
+                    Aucune van. Ajoute une ligne pour commencer.
                   </div>
-                );
-              })}
+                )}
+
+                <div className="table-wrap">
+                  <table className="tbl tbl-vans">
+                    <thead>
+                      <tr>
+                        <th>Utiliser</th>
+                        <th>Nom</th>
+                        <th>Groupe (optionnel)</th>
+                        <th>Longueur X</th>
+                        <th>Largeur Y</th>
+                        <th>Hauteur Z</th>
+                        <th>Coût (total groupe)</th>
+                        <th>Poids max</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {vans.map((v,i)=>{
+                        const key=String(v.group||v.name||"").trim();
+                        const info=key?groupInfo.get(key):null;
+                        const isGroup=info&&info.count>1;
+                        const isMaster=!isGroup || (info && info.firstIdx===i);
+                        const costDisabled = !signedIn || !isMaster;
+                        return (
+                          <tr key={i}>
+                            <td className="td-center">
+                              <input
+                                type="checkbox"
+                                checked={v.enabled !== false}
+                                onChange={e=>updateVan(i,"enabled",e.target.checked)}
+                                disabled={!signedIn}
+                              />
+                            </td>
+                            <td><input value={sv(v.name)} onChange={e=>updateVan(i,"name",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in"/></td>
+                            <td>
+                              <input
+                                value={sv(v.group)}
+                                onChange={e=>updateVan(i,"group",e.target.value)}
+                                onBlur={()=>saveNow("vans")}
+                                disabled={!signedIn}
+                                className="td-in"
+                                placeholder=""
+                              />
+                            </td>
+                            <td><input type="number" value={sv(v.l)} onChange={e=>updateVan(i,"l",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in"/></td>
+                            <td><input type="number" value={sv(v.w)} onChange={e=>updateVan(i,"w",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in"/></td>
+                            <td><input type="number" value={sv(v.h)} onChange={e=>updateVan(i,"h",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in"/></td>
+                            <td>
+                              <input type="number" value={sv(v.cost)} onChange={e=>updateVan(i,"cost",e.target.value)} onBlur={()=>saveNow("vans")} disabled={costDisabled} className="td-in td-cost"/>
+                              {isGroup && !isMaster && (<div className="cost-note">Coût verrouillé (total du groupe)</div>)}
+                            </td>
+                            <td><input type="number" value={sv(v.maxW)} onChange={e=>updateVan(i,"maxW",e.target.value)} onBlur={()=>saveNow("vans")} disabled={!signedIn} className="td-in"/></td>
+                            <td className="td-right"><button onClick={()=>{ if(window.confirm("Êtes-vous sûr de vouloir supprimer cette van ?")) delVan(i); }} disabled={!signedIn} className="btn-xs">Supprimer</button></td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+
+            {/* BUNDLES */}
+            <section className="section-center mt-16">
+              <div className="card card-rows">
+                <div className="card-head">
+                  <h2 className="card-title">Bundles</h2>
+                  <div className="flex-1" />
+                  <button onClick={()=>setShowPaste(true)} disabled={!signedIn} className="btn-sm">Coller (Excel)</button>
+                  <button onClick={()=>{ if(window.confirm("Êtes-vous sûr de vouloir supprimer tous les bundles ?")) clearAllRows(); }} disabled={!signedIn||rows.length===0} className="btn-sm">Tout supprimer</button>
+                </div>
+
+                {rows.length===0 && (<div className="hint">Aucun bundle. Ajoute une ligne ou colle depuis Excel.</div>)}
+
+                <div className="table-wrap small">
+                  <table className="tbl tbl-rows">
+                    <thead><tr><th>ID</th><th>L (X)</th><th>H (Z)</th><th>Poids/unité</th><th></th></tr></thead>
+                    <tbody>
+                      {rows.map((r,i)=>(
+                        <tr key={i}>
+                          <td><input value={sv(r.id)} onChange={e=>updateRow(i,"id",e.target.value)} onBlur={()=>saveNow("rows")} className="td-in" disabled={!signedIn}/></td>
+                          <td><input type="number" value={sv(r.l)} onChange={e=>updateRow(i,"l",e.target.value)} onBlur={()=>saveNow("rows")} className="td-in" disabled={!signedIn}/></td>
+                          <td><input type="number" value={sv(r.h)} onChange={e=>updateRow(i,"h",e.target.value)} onBlur={()=>saveNow("rows")} className="td-in" disabled={!signedIn}/></td>
+                          <td><input type="number" value={sv(r.wt)} onChange={e=>updateRow(i,"wt",e.target.value)} onBlur={()=>saveNow("rows")} className="td-in" disabled={!signedIn}/></td>
+                          <td className="td-right"><button onClick={()=>{ if(window.confirm("Êtes-vous sûr de vouloir supprimer ce bundle ?")) delRow(i); }} disabled={!signedIn} className="btn-xs">Supprimer</button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div className="rows-actions">
+                    <button onClick={addRow} disabled={!signedIn} className="btn-sm">+ Ajouter une ligne</button>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            {/* CALCUL */}
+            <div className="calc-wrap">
+              <button onClick={run} disabled={vans.length===0||rows.length===0} className="btn-calc">CALCULER</button>
             </div>
+
+            {/* RÉSULTATS */}
+            {result&&(
+              <section className="section-center mt-20">
+                <div className="card card-results">
+                  <h2 className="card-title mb-6">Résultats</h2>
+                  <p className="resum">
+                    <b>Vans utilisées:</b> {billing.usedVans} — <b>Coût total:</b> {Number(billing.totalCost).toLocaleString()} — <b>Piles restantes:</b> {result.stats.unplacedCount}
+                  </p>
+                  <div className="results-grid">
+                    {result.vans.map((v,idx)=>{
+                      const label=`Van ${idx+1} - ${sv(v.name)||"—"}${v.group?` (${v.group})`:""}`;
+                      return (
+                        <div key={idx} className="van-card">
+                          <div className="van-title">{label}</div>
+                          <div className="van-weight">Poids: <b>{Number(v.weightUsed||0).toLocaleString()}</b>{v.maxWeight?<> / <b>{Number(v.maxWeight).toLocaleString()}</b></>:null}</div>
+                          <View3D van={v} colorMap={colorMap} height={380} vanLabel={label}/>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </section>
+            )}
           </div>
-        </section>
+        </div>
       )}
 
       <ExcelPasteModal open={showPaste} onClose={()=>setShowPaste(false)} onImport={importRows}/>
