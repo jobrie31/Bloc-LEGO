@@ -29,7 +29,7 @@ export default function TrajetsMenu({
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewItem, setPreviewItem] = useState(null);
 
-  // Compte “vans utilisées” affiché façon UI (bi-train = 1)
+  // Compte “vans utilisées” affiché façon UI (bi-train = 1 pack)
   const usedVanPacksCount = useMemo(() => {
     if (!result || !Array.isArray(result.vans)) return 0;
     const map = new Map();
@@ -79,12 +79,23 @@ export default function TrajetsMenu({
   // Enregistrer le trajet courant (partagé)
   async function handleSave() {
     setErr("");
-    if (!signedIn) { setErr("Tu dois être connecté."); return; }
+    if (!signedIn) {
+      setErr("Tu dois être connecté.");
+      return;
+    }
     if (!result || !Array.isArray(result.vans) || result.vans.length === 0) {
       setErr("Aucun résultat à enregistrer. Lance d’abord le calcul.");
       return;
     }
-    if (!title.trim()) { setErr("Donne un titre au trajet."); return; }
+    if (!title.trim()) {
+      setErr("Donne un titre au trajet.");
+      return;
+    }
+
+    // Nombre de vans physiques (même logique que dans la modale : result.vans.length)
+    const physicalVansCount = Array.isArray(result.vans)
+      ? result.vans.length
+      : Number(billing?.usedVans || 0);
 
     setSaving(true);
     try {
@@ -93,7 +104,7 @@ export default function TrajetsMenu({
         notes: notes.trim(),
         context: {
           userEmail: user?.email || "",
-          vansSnapshot: vans || [],     // inclut les 'cost' saisis
+          vansSnapshot: vans || [], // inclut les 'cost' saisis
           rowsSnapshot: rows || [],
         },
         result: {
@@ -101,8 +112,8 @@ export default function TrajetsMenu({
           vans: result.vans || [],
           billing: {
             totalCost: Number(billing?.totalCost || 0),
-            usedVanPacks: usedVanPacksCount,
-            usedVansRaw: Number(billing?.usedVans || 0),
+            usedVanPacks: usedVanPacksCount,      // bi-train = 1 pack (pour l’affichage local)
+            usedVansRaw: physicalVansCount,       // vans physiques (3 dans ton exemple)
           },
           costBreakdown: buildCostBreakdown(result.vans || []),
         },
@@ -168,12 +179,19 @@ export default function TrajetsMenu({
           </button>
 
           <div className="tm-meta">
-            <div><b>Coût total:</b> {Number(billing?.totalCost || 0).toLocaleString()}</div>
-            <div><b>Vans (affichage):</b> {usedVanPacksCount}</div>
+            <div>
+              <b>Coût total:</b>{" "}
+              {Number(billing?.totalCost || 0).toLocaleString()}
+            </div>
+            <div>
+              <b>Vans (affichage):</b> {usedVanPacksCount}
+            </div>
           </div>
 
           {err && <div className="tm-error">{err}</div>}
-          {!signedIn && <div className="tm-hint">Connecte-toi pour enregistrer des trajets.</div>}
+          {!signedIn && (
+            <div className="tm-hint">Connecte-toi pour enregistrer des trajets.</div>
+          )}
         </div>
 
         <div className="tm-list-head">
@@ -185,21 +203,51 @@ export default function TrajetsMenu({
           {items.length === 0 && !loading && (
             <div className="tm-empty">Aucun trajet pour l’instant.</div>
           )}
-          {items.map((t) => (
-            <div key={t.id} className="tm-item">
-              <div className="tm-item-main">
-                <div className="tm-item-title">{t.title || "Sans titre"}</div>
-                <div className="tm-item-sub">
-                  {formatDateTime(t.createdAt)} — <b>{fmtMoney(t.result?.billing?.totalCost)}</b> — {String(t.result?.billing?.usedVanPacks || 0)} van(s)
-                  {t.author?.email ? <> — <i>{t.author.email}</i></> : null}
+          {items.map((t) => {
+            // 👉 même procédé que dans la modale : nombre de vans = t.result.vans.length
+            const vansCount = Array.isArray(t.result?.vans)
+              ? t.result.vans.length
+              : Number(
+                  t.result?.billing?.usedVansRaw ??
+                    t.result?.billing?.usedVanPacks ??
+                    0
+                );
+
+            return (
+              <div key={t.id} className="tm-item">
+                <div className="tm-item-main">
+                  <div className="tm-item-title">{t.title || "Sans titre"}</div>
+                  <div className="tm-item-sub">
+                    {formatDateTime(t.createdAt)} —{" "}
+                    <b>{fmtMoney(t.result?.billing?.totalCost)}</b> —{" "}
+                    {String(vansCount)} vans
+                    {t.author?.email ? (
+                      <>
+                        {" "}
+                        — <i>{t.author.email}</i>
+                      </>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="tm-item-actions">
+                  <button
+                    className="tm-btn"
+                    onClick={() => openPreview(t)}
+                    title="Aperçu"
+                  >
+                    👁️
+                  </button>
+                  <button
+                    className="tm-btn danger"
+                    onClick={() => removeOne(t.id)}
+                    title="Supprimer"
+                  >
+                    🗑️
+                  </button>
                 </div>
               </div>
-              <div className="tm-item-actions">
-                <button className="tm-btn" onClick={() => openPreview(t)} title="Aperçu">👁️</button>
-                <button className="tm-btn danger" onClick={() => removeOne(t.id)} title="Supprimer">🗑️</button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </aside>
 

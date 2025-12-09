@@ -50,21 +50,28 @@ export default function TrajetPreviewModal({ open, trajet, onClose }) {
   // 3) Chiffres de la bulle du haut
   const topBubble = useMemo(() => {
     const totalCost = Number(billing.totalCost || 0);
-    const totalVans = resultVans.length;                // nombre total de vans dans le résultat
-    const bundlesCount = rowsSnapshot.length;           // nombre de bundles dans le snapshot
+    const totalVans = resultVans.length;          // nombre total de vans dans le résultat
+    const bundlesCount = rowsSnapshot.length;     // nombre de bundles dans le snapshot
     return { totalCost, totalVans, bundlesCount };
   }, [billing, resultVans, rowsSnapshot]);
 
   if (!open) return null;
 
   return (
-    <div className="tp-backdrop" onClick={(e)=>{ if(e.target.classList.contains("tp-backdrop")) onClose?.(); }}>
+    <div
+      className="tp-backdrop"
+      onClick={(e) => {
+        if (e.target.classList.contains("tp-backdrop")) onClose?.();
+      }}
+    >
       <div className="tp-modal">
         <div className="tp-header">
           <div className="tp-title">
             {title || "Trajet"} — {dateOnly}
           </div>
-          <button className="tp-close" onClick={onClose}>✕</button>
+          <button className="tp-close" onClick={onClose}>
+            ✕
+          </button>
         </div>
 
         {/* Bulle du haut : coût total, # vans, # bundles */}
@@ -117,7 +124,11 @@ export default function TrajetPreviewModal({ open, trajet, onClose }) {
                     className={`tp-row ${used ? "tp-row-used" : ""}`}
                   >
                     <div className="tp-td tp-td-mult">
-                      {used ? <span className="tp-mult-badge">{usedCount}X</span> : ""}
+                      {used ? (
+                        <span className="tp-mult-badge">{usedCount}X</span>
+                      ) : (
+                        ""
+                      )}
                     </div>
                     <div className="tp-td">{String(v?.name ?? "")}</div>
                     <div className="tp-td">{String(v?.group ?? "")}</div>
@@ -171,9 +182,13 @@ export default function TrajetPreviewModal({ open, trajet, onClose }) {
                   <div key={idx} className="tp-3d-card">
                     <div className="tp-3d-title">{label}</div>
                     <div className="tp-3d-sub">
-                      Poids: <b>{Number(v.weightUsed || 0).toLocaleString()}</b>
+                      Poids:{" "}
+                      <b>{Number(v.weightUsed || 0).toLocaleString()}</b>
                       {v.maxWeight ? (
-                        <> / <b>{Number(v.maxWeight).toLocaleString()}</b></>
+                        <>
+                          {" "}
+                          / <b>{Number(v.maxWeight).toLocaleString()}</b>
+                        </>
                       ) : null}
                     </div>
                     <View3D van={v} height={320} />
