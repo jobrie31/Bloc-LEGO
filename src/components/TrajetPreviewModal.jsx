@@ -1,9 +1,7 @@
-// src/components/TrajetPreviewModal.jsx
 import React, { useEffect, useMemo } from "react";
 import View3D from "./View3D";
 
 export default function TrajetPreviewModal({ open, trajet, onClose }) {
-  // hooks toujours dans le même ordre pour éviter l’avertissement React
   useEffect(() => {
     function onEsc(e) {
       if (e.key === "Escape") onClose?.();
@@ -12,12 +10,7 @@ export default function TrajetPreviewModal({ open, trajet, onClose }) {
     return () => window.removeEventListener("keydown", onEsc);
   }, [open, onClose]);
 
-  const {
-    title,
-    createdAt,
-    context = {},
-    result = {},
-  } = trajet || {};
+  const { title, createdAt, context = {}, result = {} } = trajet || {};
 
   const vansSnapshot = context.vansSnapshot || [];
   const rowsSnapshot = context.rowsSnapshot || [];
@@ -47,11 +40,41 @@ export default function TrajetPreviewModal({ open, trajet, onClose }) {
     return m;
   }, [resultVans]);
 
+  // ✅ Vans à afficher dans le snapshot = seulement celles cochées lors du test
+  // - si le snapshot contient un champ de coche (checked/isChecked/selected/...)
+  //   => on filtre sur ce champ
+  // - sinon (on ne peut pas savoir lesquelles étaient cochées)
+  //   => fallback: on montre seulement celles utilisées dans le résultat
+  const visibleVansSnapshot = useMemo(() => {
+    const CHECK_KEYS = ["checked", "isChecked", "selected", "enabled", "useInTest", "include"];
+
+    const hasAnyCheckField = vansSnapshot.some((v) => CHECK_KEYS.some((k) => v && k in v));
+
+    const isChecked = (v) => {
+      const val =
+        v?.checked ??
+        v?.isChecked ??
+        v?.selected ??
+        v?.enabled ??
+        v?.useInTest ??
+        v?.include;
+      return val === true || val === 1 || val === "true" || val === "1";
+    };
+
+    if (hasAnyCheckField) return vansSnapshot.filter(isChecked);
+
+    // fallback: seulement celles utilisées
+    return vansSnapshot.filter((v) => {
+      const key = String(v?.group || v?.name || "").trim() || "";
+      return (usageByKey.get(key) || 0) > 0;
+    });
+  }, [vansSnapshot, usageByKey]);
+
   // 3) Chiffres de la bulle du haut
   const topBubble = useMemo(() => {
     const totalCost = Number(billing.totalCost || 0);
-    const totalVans = resultVans.length;          // nombre total de vans dans le résultat
-    const bundlesCount = rowsSnapshot.length;     // nombre de bundles dans le snapshot
+    const totalVans = resultVans.length;
+    const bundlesCount = rowsSnapshot.length;
     return { totalCost, totalVans, bundlesCount };
   }, [billing, resultVans, rowsSnapshot]);
 
@@ -74,31 +97,25 @@ export default function TrajetPreviewModal({ open, trajet, onClose }) {
           </button>
         </div>
 
-        {/* Bulle du haut : coût total, # vans, # bundles */}
+        {/* Bulle du haut */}
         <div className="tp-top-bubble">
           <div className="tp-bubble-item">
             <div className="tp-bubble-label">Coût total</div>
-            <div className="tp-bubble-value">
-              {topBubble.totalCost.toLocaleString()}
-            </div>
+            <div className="tp-bubble-value">{topBubble.totalCost.toLocaleString()}</div>
           </div>
           <div className="tp-bubble-item">
             <div className="tp-bubble-label">Vans</div>
-            <div className="tp-bubble-value">
-              {topBubble.totalVans}
-            </div>
+            <div className="tp-bubble-value">{topBubble.totalVans}</div>
           </div>
           <div className="tp-bubble-item">
             <div className="tp-bubble-label">Bundles</div>
-            <div className="tp-bubble-value">
-              {topBubble.bundlesCount}
-            </div>
+            <div className="tp-bubble-value">{topBubble.bundlesCount}</div>
           </div>
         </div>
 
-        {/* Snapshots (ordre demandé : Vans puis Bundles) */}
+        {/* Snapshots : Vans */}
         <div className="tp-section">
-          <div className="tp-section-title">Vans (snapshot)</div>
+          <div className="tp-section-title">Vans</div>
           <div className="tp-table">
             <div className="tp-thead">
               <div className="tp-th tp-th-mult">×</div>
@@ -110,25 +127,21 @@ export default function TrajetPreviewModal({ open, trajet, onClose }) {
               <div className="tp-th">Coût</div>
               <div className="tp-th">Poids max</div>
             </div>
+
             <div className="tp-tbody">
-              {vansSnapshot.length === 0 && (
+              {visibleVansSnapshot.length === 0 && (
                 <div className="tp-row tp-empty">Aucune van.</div>
               )}
-              {vansSnapshot.map((v, i) => {
-                const key = (String(v?.group || v?.name || "").trim()) || "";
-                const usedCount = usageByKey.get(key) || 0; // 0 si non utilisée
+
+              {visibleVansSnapshot.map((v, i) => {
+                const key = String(v?.group || v?.name || "").trim() || "";
+                const usedCount = usageByKey.get(key) || 0;
                 const used = usedCount > 0;
+
                 return (
-                  <div
-                    key={i}
-                    className={`tp-row ${used ? "tp-row-used" : ""}`}
-                  >
+                  <div key={i} className={`tp-row ${used ? "tp-row-used" : ""}`}>
                     <div className="tp-td tp-td-mult">
-                      {used ? (
-                        <span className="tp-mult-badge">{usedCount}X</span>
-                      ) : (
-                        ""
-                      )}
+                      {used ? <span className="tp-mult-badge">{usedCount}X</span> : ""}
                     </div>
                     <div className="tp-td">{String(v?.name ?? "")}</div>
                     <div className="tp-td">{String(v?.group ?? "")}</div>
@@ -144,8 +157,9 @@ export default function TrajetPreviewModal({ open, trajet, onClose }) {
           </div>
         </div>
 
+        {/* Snapshots : Bundles */}
         <div className="tp-section">
-          <div className="tp-section-title">Bundles (snapshot)</div>
+          <div className="tp-section-title">Bundles</div>
           <div className="tp-table">
             <div className="tp-thead">
               <div className="tp-th">ID</div>
@@ -169,7 +183,7 @@ export default function TrajetPreviewModal({ open, trajet, onClose }) {
           </div>
         </div>
 
-        {/* Résultat 3D (comme avant) */}
+        {/* Résultat 3D */}
         {resultVans.length > 0 && (
           <div className="tp-section">
             <div className="tp-section-title">Vans (résultat 3D)</div>
@@ -182,8 +196,7 @@ export default function TrajetPreviewModal({ open, trajet, onClose }) {
                   <div key={idx} className="tp-3d-card">
                     <div className="tp-3d-title">{label}</div>
                     <div className="tp-3d-sub">
-                      Poids:{" "}
-                      <b>{Number(v.weightUsed || 0).toLocaleString()}</b>
+                      Poids: <b>{Number(v.weightUsed || 0).toLocaleString()}</b>
                       {v.maxWeight ? (
                         <>
                           {" "}
@@ -191,7 +204,9 @@ export default function TrajetPreviewModal({ open, trajet, onClose }) {
                         </>
                       ) : null}
                     </div>
-                    <View3D van={v} height={320} />
+
+                    {/* ✅ légende tiny seulement en snapshot */}
+                    <View3D van={v} height={320} legendPreset="tiny" />
                   </div>
                 );
               })}

@@ -3,9 +3,10 @@
   line-height: 1.5;
   font-weight: 400;
 
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+  /* ✅ ton app est en style clair, donc on force light */
+  color-scheme: light;
+  color: #213547;
+  background-color: #ffffff;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -22,12 +23,20 @@ a:hover {
   color: #535bf2;
 }
 
+/* ✅ IMPORTANT : enlève le display:flex + place-items:center (ça centre tout verticalement) */
 body {
   margin: 0;
-  display: flex;
-  place-items: center;
   min-width: 320px;
   min-height: 100vh;
+
+  display: block;
+}
+
+/* ✅ Root pleine largeur */
+#root {
+  width: 100%;
+  margin: 0;
+  padding: 0;
 }
 
 h1 {
@@ -42,7 +51,7 @@ button {
   font-size: 1em;
   font-weight: 500;
   font-family: inherit;
-  background-color: #1a1a1a;
+  background-color: #f9f9f9;
   cursor: pointer;
   transition: border-color 0.25s;
 }
@@ -54,6 +63,7 @@ button:focus-visible {
   outline: 4px auto -webkit-focus-ring-color;
 }
 
+/* (optionnel) garde le media query mais maintenant le thème est déjà clair */
 @media (prefers-color-scheme: light) {
   :root {
     color: #213547;

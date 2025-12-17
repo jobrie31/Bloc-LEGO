@@ -7,8 +7,11 @@ import { useMemo } from "react";
  * Axes (monde 3D) : X = longueur (L), Y = hauteur (H), Z = largeur (l)
  * Unités : pouces
  */
-export default function View3D({ van, colorMap, height = 420 }) {
-  const { l = 0, w = 0, h = 0, placed = [] } = van;
+export default function View3D({ van, colorMap, height = 420, legendPreset = "normal" }) {
+  const { l = 0, w = 0, h = 0, placed = [] } = van || {};
+
+  const compact = legendPreset === "compact";
+  const tiny = legendPreset === "tiny";
 
   // --------- Caméra : distance sûre pour éviter le zoom trop proche
   const diag = Math.sqrt(l * l + w * w + h * h) || 1;
@@ -48,7 +51,9 @@ export default function View3D({ van, colorMap, height = 420 }) {
   // --------- Légende : 1 entrée par type (premier bloc de chaque type)
   const legend = useMemo(() => {
     const firstByType = new Map();
-    for (const it of items) if (it.type && !firstByType.has(it.type)) firstByType.set(it.type, it);
+    for (const it of items) {
+      if (it.type && !firstByType.has(it.type)) firstByType.set(it.type, it);
+    }
     const arr = [...firstByType.entries()].map(([type, it]) => ({
       type: String(type),
       color: it.color,
@@ -110,30 +115,34 @@ export default function View3D({ van, colorMap, height = 420 }) {
         />
       </Canvas>
 
-      {/* Légende avec mini prisme isométrique et dimensions L / H */}
+      {/* Légende */}
       {legend.length > 0 && (
         <div
           style={{
             position: "absolute",
-            top: 10,
-            right: 10,
-            background: "rgba(255,255,255,0.92)",
+            top: tiny ? 6 : 10,
+            right: tiny ? 6 : 10,
+            background: "rgba(255,255,255,0.90)",
             border: "1px solid #e5e7eb",
-            borderRadius: 10,
-            padding: "10px 12px",
+            borderRadius: tiny ? 8 : 10,
+            padding: tiny ? "4px 6px" : compact ? "6px 8px" : "10px 12px",
             fontFamily: "system-ui, Arial, sans-serif",
-            fontSize: 12,
-            maxHeight: "75%",
+            fontSize: tiny ? 9 : compact ? 10 : 12,
+            maxHeight: "70%",
             overflow: "auto",
-            boxShadow: "0 8px 24px rgba(0,0,0,0.08)",
+            boxShadow: "0 6px 16px rgba(0,0,0,0.07)",
             backdropFilter: "saturate(1.1) blur(2px)",
-            minWidth: 170,
+            minWidth: tiny ? 110 : compact ? 130 : 170,
           }}
         >
-          <div style={{ fontWeight: 800, marginBottom: 8 }}>Légende (moulures)</div>
-          <div style={{ display: "grid", gap: 10 }}>
+          {/* ✅ enlever "(moulures)" en snapshot (compact/tiny) */}
+          <div style={{ fontWeight: 800, marginBottom: tiny ? 4 : compact ? 6 : 8 }}>
+            {compact || tiny ? "Légende" : "Légende (moulures)"}
+          </div>
+
+          <div style={{ display: "grid", gap: tiny ? 4 : compact ? 6 : 10 }}>
             {legend.map((e) => (
-              <LegendRow key={e.type} entry={e} />
+              <LegendRow key={e.type} entry={e} compact={compact} tiny={tiny} />
             ))}
           </div>
         </div>
@@ -144,23 +153,39 @@ export default function View3D({ van, colorMap, height = 420 }) {
 
 /* ---------- Légende : une ligne avec mini prisme SVG + type + valeurs ---------- */
 
-function LegendRow({ entry }) {
+function LegendRow({ entry, compact, tiny }) {
   const { type, color, L = 0, W = 0, H = 0 } = entry;
+
+  const prismW = tiny ? 34 : compact ? 44 : 56;
+  const prismH = tiny ? 24 : compact ? 32 : 42;
+
   return (
     <div
       title={type}
       style={{
         display: "grid",
-        gridTemplateColumns: "56px 1fr",
+        gridTemplateColumns: `${prismW}px 1fr`,
         alignItems: "center",
-        gap: 10,
+        gap: tiny ? 6 : compact ? 8 : 10,
       }}
     >
-      <MiniIsoPrism L={L} W={W} H={H} color={color} />
-      <div style={{ display: "grid", gap: 2 }}>
-        <div style={{ fontWeight: 600, fontSize: 12 }}>{type}</div>
-        <div style={{ opacity: 0.75, fontSize: 11 }}>
-          L = {fmt(L)}″ &nbsp;•&nbsp; H = {fmt(H)}″
+      <MiniIsoPrism
+        L={L}
+        W={W}
+        H={H}
+        color={color}
+        width={prismW}
+        height={prismH}
+        labelFont={tiny ? 6 : compact ? 7 : 8}
+        arrowHead={tiny ? 3 : compact ? 4 : 5}
+      />
+
+      <div style={{ display: "grid", gap: 1 }}>
+        <div style={{ fontWeight: 600, fontSize: tiny ? 9 : compact ? 10 : 12, lineHeight: 1.1 }}>
+          {type}
+        </div>
+        <div style={{ opacity: 0.75, fontSize: tiny ? 8 : compact ? 9 : 11, lineHeight: 1.1 }}>
+          L={fmt(L)}″ • H={fmt(H)}″
         </div>
       </div>
     </div>
@@ -169,11 +194,20 @@ function LegendRow({ entry }) {
 
 /* ---------- Mini prisme isométrique en SVG, avec flèches L et H ---------- */
 
-function MiniIsoPrism({ L = 1, W = 1, H = 1, color = "#777" }) {
+function MiniIsoPrism({
+  L = 1,
+  W = 1,
+  H = 1,
+  color = "#777",
+  width = 56,
+  height = 42,
+  labelFont = 8,
+  arrowHead = 5,
+}) {
   // Projection isométrique simple
   const iso = (x, y, z) => {
     const sx = (x - z) * 0.8660254; // cos(30°)
-    const sy = y + (x + z) * 0.5;   // sin(30°)
+    const sy = y + (x + z) * 0.5; // sin(30°)
     return [sx, sy];
   };
 
@@ -194,7 +228,7 @@ function MiniIsoPrism({ L = 1, W = 1, H = 1, color = "#777" }) {
     Object.entries(P).map(([k, v]) => [k, iso(v[0], v[1], v[2])])
   );
 
-  // Box projetée → fit dans 56×42
+  // Box projetée → fit dans width×height
   const allX = Object.values(pts).map((p) => p[0]);
   const allY = Object.values(pts).map((p) => p[1]);
   const minX = Math.min(...allX),
@@ -204,8 +238,8 @@ function MiniIsoPrism({ L = 1, W = 1, H = 1, color = "#777" }) {
   const w0 = maxX - minX || 1,
     h0 = maxY - minY || 1;
   const pad = 3;
-  const targetW = 56 - pad * 2;
-  const targetH = 42 - pad * 2;
+  const targetW = width - pad * 2;
+  const targetH = height - pad * 2;
   const scale = Math.min(targetW / w0, targetH / h0);
   const ox = pad - minX * scale + (targetW - w0 * scale) / 2;
   const oy = pad - minY * scale + (targetH - h0 * scale) / 2;
@@ -227,47 +261,45 @@ function MiniIsoPrism({ L = 1, W = 1, H = 1, color = "#777" }) {
   const [AEmX, AEmY] = mid(AE[0], AE[1]);
 
   return (
-    <svg width="56" height="42" viewBox="0 0 56 42">
-      {/* ombre légère */}
-      <rect x="0" y="0" width="56" height="42" rx="6" ry="6" fill="transparent" />
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
+      <rect x="0" y="0" width={width} height={height} rx="6" ry="6" fill="transparent" />
+
       {/* faces */}
       <polygon points={poly(left)} fill={shade(color, -18)} stroke="#00000020" />
       <polygon points={poly(right)} fill={shade(color, -8)} stroke="#00000020" />
       <polygon points={poly(top)} fill={shade(color, 0)} stroke="#00000020" />
 
       {/* flèche L (EF) */}
-      <Arrow x1={EF[0][0]} y1={EF[0][1]} x2={EF[1][0]} y2={EF[1][1]} />
-      <text x={EFmX} y={EFmY - 2} textAnchor="middle" fontSize="8" fill="#111">
+      <Arrow x1={EF[0][0]} y1={EF[0][1]} x2={EF[1][0]} y2={EF[1][1]} head={arrowHead} />
+      <text x={EFmX} y={EFmY - 2} textAnchor="middle" fontSize={labelFont} fill="#111">
         L
       </text>
 
       {/* flèche H (AE) */}
-      <Arrow x1={AE[0][0]} y1={AE[0][1]} x2={AE[1][0]} y2={AE[1][1]} />
-      <text x={AEmX - 4} y={AEmY} textAnchor="end" fontSize="8" fill="#111">
+      <Arrow x1={AE[0][0]} y1={AE[0][1]} x2={AE[1][0]} y2={AE[1][1]} head={arrowHead} />
+      <text x={AEmX - 4} y={AEmY} textAnchor="end" fontSize={labelFont} fill="#111">
         H
       </text>
     </svg>
   );
 }
 
-function Arrow({ x1, y1, x2, y2 }) {
+function Arrow({ x1, y1, x2, y2, head = 5 }) {
   const len = Math.hypot(x2 - x1, y2 - y1) || 1;
   const ux = (x2 - x1) / len;
   const uy = (y2 - y1) / len;
-  const a = 5; // taille pointe
+  const a = head;
   const backX = x2 - ux * a;
   const backY = y2 - uy * a;
-  const leftX = backX + (-uy) * (a * 0.6);
-  const leftY = backY + (ux) * (a * 0.6);
-  const rightX = backX - (-uy) * (a * 0.6);
-  const rightY = backY - (ux) * (a * 0.6);
+  const leftX = backX + -uy * (a * 0.6);
+  const leftY = backY + ux * (a * 0.6);
+  const rightX = backX - -uy * (a * 0.6);
+  const rightY = backY - ux * (a * 0.6);
+
   return (
     <>
       <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#374151" strokeWidth="1" />
-      <polygon
-        points={`${x2},${y2} ${leftX},${leftY} ${rightX},${rightY}`}
-        fill="#374151"
-      />
+      <polygon points={`${x2},${y2} ${leftX},${leftY} ${rightX},${rightY}`} fill="#374151" />
     </>
   );
 }
@@ -304,7 +336,9 @@ function shade(hex, amount = 0) {
     g = Math.max(0, Math.min(255, g));
     b = Math.max(0, Math.min(255, b));
     return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
-  } catch { return hex; }
+  } catch {
+    return hex;
+  }
 }
 
 function fmt(n) {

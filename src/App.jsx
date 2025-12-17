@@ -652,16 +652,8 @@ export default function App(){
       )}
 
       {signedIn && (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "minmax(280px, 320px) 1fr",
-            gap: 16,
-            alignItems: "start",
-            marginTop: 10
-          }}
-        >
-          {/* --- Colonne gauche : Trajets --- */}
+        <>
+          {/* ✅ TrajetsMenu est fixed (CSS), donc pas besoin de grille 2 colonnes */}
           <TrajetsMenu
             signedIn={signedIn}
             user={user}
@@ -671,7 +663,7 @@ export default function App(){
             billing={billing}
           />
 
-          {/* --- Colonne droite : Application principale --- */}
+          {/* --- Application principale --- */}
           <div>
             {/* VANS */}
             <section className="section-center mt-10">
@@ -812,7 +804,7 @@ export default function App(){
               </section>
             )}
           </div>
-        </div>
+        </>
       )}
 
       <ExcelPasteModal open={showPaste} onClose={()=>setShowPaste(false)} onImport={importRows}/>
