@@ -5,13 +5,13 @@ import { getFirestore } from "firebase/firestore";
 
 // --- CONFIG WEB (corrigée) ---
 const firebaseConfig = {
-  apiKey: "AIzaSyCQxGJlYX-PHyX_QiLoVtYTlDiXln-9LaY",
-  authDomain: "bloc-lego.firebaseapp.com",
-  projectId: "bloc-lego",
-  storageBucket: "bloc-lego.appspot.com", // ✅ correction ici
-  messagingSenderId: "551752798435",
-  appId: "1:551752798435:web:2848778b2bbe503b87b5d6",
-  measurementId: "G-EP7LDMD2QB",
+  apiKey: "AIzaSyBYbBid4Cm4viZsQfX7uECAZkQu-SuIU24",
+  authDomain: "inventaire-styro.firebaseapp.com",
+  projectId: "inventaire-styro",
+  storageBucket: "inventaire-styro.firebasestorage.app",
+  messagingSenderId: "15818382324",
+  appId: "1:15818382324:web:32d3558647b2c100bc37a1",
+  measurementId: "G-8LCSLRKYHB",
 };
 
 // Init (évite double init en HMR)
@@ -19,6 +19,7 @@ const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
 
 // Exports principaux
 export const auth = getAuth(app);
+auth.tenantId = "BLOC-LEGO-kg0q1";
 export const db   = getFirestore(app);
 
 // Connexion anonyme automatique (pour lier tes sauvegardes)
