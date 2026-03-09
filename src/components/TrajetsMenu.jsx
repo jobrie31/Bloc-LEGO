@@ -1,6 +1,10 @@
 // src/components/TrajetsMenu.jsx
 import React, { useEffect, useMemo, useState } from "react";
-import { saveTrajet, subscribeTrajets, deleteTrajet } from "../services/firestore";
+import {
+  saveTrajet,
+  subscribeTrajets,
+  deleteTrajet,
+} from "../services/firestore";
 import TrajetPreviewModal from "./TrajetPreviewModal";
 
 /**
@@ -34,7 +38,8 @@ export default function TrajetsMenu({
     if (!result || !Array.isArray(result.vans)) return 0;
     const map = new Map();
     for (const v of result.vans) {
-      const key = String(v.group || v.name || "").trim() || `__solo_${v.code || ""}`;
+      const key =
+        String(v.group || v.name || "").trim() || `__solo_${v.code || ""}`;
       const groupSize = Number(v.groupSize || 1);
       if (!map.has(key)) map.set(key, { count: 1, groupSize });
       else {
@@ -104,7 +109,7 @@ export default function TrajetsMenu({
         notes: notes.trim(),
         context: {
           userEmail: user?.email || "",
-          vansSnapshot: vans || [], // inclut les 'cost' saisis
+          vansSnapshot: vans || [],
           rowsSnapshot: rows || [],
         },
         result: {
@@ -112,8 +117,8 @@ export default function TrajetsMenu({
           vans: result.vans || [],
           billing: {
             totalCost: Number(billing?.totalCost || 0),
-            usedVanPacks: usedVanPacksCount,      // bi-train = 1 pack (pour l’affichage local)
-            usedVansRaw: physicalVansCount,       // vans physiques (3 dans ton exemple)
+            usedVanPacks: usedVanPacksCount,
+            usedVansRaw: physicalVansCount,
           },
           costBreakdown: buildCostBreakdown(result.vans || []),
         },
@@ -121,7 +126,6 @@ export default function TrajetsMenu({
       await saveTrajet(payload, user);
       setTitle("");
       setNotes("");
-      // onSnapshot mettra la liste à jour automatiquement
     } catch (e) {
       setErr(String(e?.message || e));
     } finally {
@@ -161,6 +165,7 @@ export default function TrajetsMenu({
             onChange={(e) => setTitle(e.target.value)}
             disabled={!signedIn || saving}
           />
+
           <label className="tm-label">Notes (optionnel)</label>
           <textarea
             className="tm-textarea"
@@ -169,6 +174,7 @@ export default function TrajetsMenu({
             onChange={(e) => setNotes(e.target.value)}
             disabled={!signedIn || saving}
           />
+
           <button
             className="tm-save"
             onClick={handleSave}
@@ -204,7 +210,6 @@ export default function TrajetsMenu({
             <div className="tm-empty">Aucun trajet pour l’instant.</div>
           )}
           {items.map((t) => {
-            // 👉 même procédé que dans la modale : nombre de vans = t.result.vans.length
             const vansCount = Array.isArray(t.result?.vans)
               ? t.result.vans.length
               : Number(
@@ -229,6 +234,7 @@ export default function TrajetsMenu({
                     ) : null}
                   </div>
                 </div>
+
                 <div className="tm-item-actions">
                   <button
                     className="tm-btn"
@@ -265,6 +271,7 @@ function fmtMoney(x) {
   const n = Number(x || 0);
   return n.toLocaleString(undefined, { minimumFractionDigits: 0 });
 }
+
 function formatDateTime(ts) {
   try {
     if (ts && typeof ts === "object" && Number.isFinite(ts.seconds)) {

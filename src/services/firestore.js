@@ -6,7 +6,6 @@ import {
   serverTimestamp,
   addDoc,
   collection,
-  // ↓ ajoutés pour Trajets
   getDocs,
   query,
   orderBy,
@@ -29,19 +28,46 @@ function requireUid() {
 }
 
 /* ---------- Refs ---------- */
-function appDocRef(uid) {
-  // Document unique par utilisateur pour stocker vans/moulures
-  return doc(db, "users", uid, "app", "v1"); // { vans:[], moulures:[] }
-}
-function runsColRef(uid) {
-  return collection(db, "users", uid, "runs"); // logs par utilisateur
+function userRootRef(uid) {
+  return doc(db, "clients", "bloc-lego", "users", uid);
 }
 
-// === Trajets partagés (collection commune)
-const trajetsSharedCol = collection(db, "trajets");
+function appDocRef(uid) {
+  return doc(db, "clients", "bloc-lego", "users", uid, "app", "v1");
+}
+
+function runsColRef(uid) {
+  return collection(db, "clients", "bloc-lego", "users", uid, "runs");
+}
+
+// anciens chemins (pour migration seulement)
+function oldAppDocRef(uid) {
+  return doc(db, "users", uid, "app", "v1");
+}
+
+function oldRunsColRef(uid) {
+  return collection(db, "users", uid, "runs");
+}
+
+// === Trajets partagés
+const trajetsSharedCol = collection(db, "clients", "bloc-lego", "trajets");
+
+/* ---------- Création du parent users/{uid} ---------- */
+async function ensureUserRoot(uid, extra = {}) {
+  await setDoc(
+    userRootRef(uid),
+    {
+      uid,
+      parentCreated: true,
+      updatedAt: serverTimestamp(),
+      ...extra,
+    },
+    { merge: true }
+  );
+}
 
 /* =========================================================
- * VANS (users/{uid}/app/v1.vans)
+ * VANS (clients/bloc-lego/users/{uid}/app/v1.vans)
  * ======================================================= */
 export async function loadVans() {
   const uid = requireUid();
@@ -57,7 +83,7 @@ export async function loadVans() {
     h: v?.h ?? null,
     cost: v?.cost ?? null,
     maxW: v?.maxW ?? null,
-    enabled: v?.enabled !== false, // défaut: true
+    enabled: v?.enabled !== false,
   }));
 }
 
@@ -71,8 +97,11 @@ export async function saveVans(vansArray) {
     h: numOrNull(v?.h),
     cost: numOrNull(v?.cost),
     maxW: numOrNull(v?.maxW),
-    enabled: v?.enabled !== false, // on persiste le flag
+    enabled: v?.enabled !== false,
   }));
+
+  await ensureUserRoot(uid);
+
   await setDoc(
     appDocRef(uid),
     { vans: list, updatedAt: serverTimestamp(), uid },
@@ -81,7 +110,7 @@ export async function saveVans(vansArray) {
 }
 
 /* =========================================================
- * MOULURES (users/{uid}/app/v1.moulures)
+ * MOULURES (clients/bloc-lego/users/{uid}/app/v1.moulures)
  * ======================================================= */
 export async function loadMoulures() {
   const uid = requireUid();
@@ -105,6 +134,9 @@ export async function saveMoulures(rows) {
     h: numOrNull(r?.h),
     wt: numOrNull(r?.wt),
   }));
+
+  await ensureUserRoot(uid);
+
   await setDoc(
     appDocRef(uid),
     { moulures: out, updatedAt: serverTimestamp(), uid },
@@ -113,10 +145,13 @@ export async function saveMoulures(rows) {
 }
 
 /* =========================================================
- * RUNS (users/{uid}/runs/*)
+ * RUNS (clients/bloc-lego/users/{uid}/runs/*)
  * ======================================================= */
 export async function saveRun(resultPayload) {
   const uid = requireUid();
+
+  await ensureUserRoot(uid);
+
   const ref = await addDoc(runsColRef(uid), {
     createdAt: serverTimestamp(),
     uid,
@@ -126,22 +161,8 @@ export async function saveRun(resultPayload) {
 }
 
 /* =========================================================
- * TRAJETS (partagés: /trajets/*)
- *  - saveTrajet(payload, user)
- *  - subscribeTrajets(cb)  [temps réel]
- *  - loadTrajets()         [chargement ponctuel]
- *  - deleteTrajet(id)
+ * TRAJETS (partagés: /clients/bloc-lego/trajets/*)
  * ======================================================= */
-
-/**
- * Enregistre un trajet partagé (résultat courant + contexte).
- * payload attendu:
- * {
- *   title, notes,
- *   context: { userEmail, vansSnapshot:[...], rowsSnapshot:[...] },
- *   result:  { stats:{...}, vans:[...], billing:{...}, costBreakdown:[...] }
- * }
- */
 export async function saveTrajet(payload, user) {
   const docData = {
     title: String(payload?.title || "").trim(),
@@ -159,7 +180,6 @@ export async function saveTrajet(payload, user) {
   return ref.id;
 }
 
-/** Abonnement temps réel à tous les trajets (ordre desc par date) */
 export function subscribeTrajets(callback) {
   const q = query(trajetsSharedCol, orderBy("createdAt", "desc"));
   const unsub = onSnapshot(q, (snap) => {
@@ -170,7 +190,6 @@ export function subscribeTrajets(callback) {
   return unsub;
 }
 
-/** Chargement ponctuel (si tu veux juste fetch une fois) */
 export async function loadTrajets() {
   const q = query(trajetsSharedCol, orderBy("createdAt", "desc"));
   const snap = await getDocs(q);
@@ -183,6 +202,129 @@ export async function loadTrajets() {
 
 export async function deleteTrajet(trajetId) {
   if (!trajetId) throw new Error("trajectId manquant.");
-  const ref = doc(db, "trajets", trajetId);
+  const ref = doc(db, "clients", "bloc-lego", "trajets", trajetId);
   await deleteDoc(ref);
+}
+
+/* =========================================================
+ * MIGRATION - anciens trajets racine -> clients/bloc-lego/trajets
+ * ======================================================= */
+export async function migrateOldTrajetsToClient() {
+  const oldCol = collection(db, "trajets");
+  const newCol = collection(db, "clients", "bloc-lego", "trajets");
+
+  const snap = await getDocs(oldCol);
+  if (snap.empty) return { copied: 0 };
+
+  let copied = 0;
+
+  for (const d of snap.docs) {
+    const data = d.data() || {};
+    const newRef = doc(newCol, d.id);
+
+    await setDoc(
+      newRef,
+      {
+        ...data,
+        migratedAt: serverTimestamp(),
+        migratedFrom: "trajets",
+      },
+      { merge: true }
+    );
+
+    copied += 1;
+  }
+
+  return { copied };
+}
+
+/* =========================================================
+ * MIGRATION - anciens users/{uid}/app/v1 -> clients/bloc-lego/users/{uid}/app/v1
+ * ======================================================= */
+export async function migrateOldUserAppToClient() {
+  const uid = requireUid();
+
+  const oldSnap = await getDoc(oldAppDocRef(uid));
+  if (!oldSnap.exists()) return { copied: 0 };
+
+  const data = oldSnap.data() || {};
+
+  // crée le parent users/{uid}
+  await ensureUserRoot(uid, {
+    migratedAt: serverTimestamp(),
+    migratedFrom: "users/{uid}",
+  });
+
+  // copie app/v1
+  await setDoc(
+    appDocRef(uid),
+    {
+      ...data,
+      uid,
+      migratedAt: serverTimestamp(),
+      migratedFrom: "users/{uid}/app/v1",
+    },
+    { merge: true }
+  );
+
+  return { copied: 1 };
+}
+
+/* =========================================================
+ * MIGRATION - anciens users/{uid}/runs/* -> clients/bloc-lego/users/{uid}/runs/*
+ * ======================================================= */
+export async function migrateOldRunsToClient() {
+  const uid = requireUid();
+
+  const oldSnap = await getDocs(oldRunsColRef(uid));
+  if (oldSnap.empty) return { copied: 0 };
+
+  // crée le parent users/{uid}
+  await ensureUserRoot(uid, {
+    migratedAt: serverTimestamp(),
+    migratedFrom: "users/{uid}",
+  });
+
+  let copied = 0;
+
+  for (const d of oldSnap.docs) {
+    const data = d.data() || {};
+    const newRef = doc(db, "clients", "bloc-lego", "users", uid, "runs", d.id);
+
+    await setDoc(
+      newRef,
+      {
+        ...data,
+        uid,
+        migratedAt: serverTimestamp(),
+        migratedFrom: "users/{uid}/runs",
+      },
+      { merge: true }
+    );
+
+    copied += 1;
+  }
+
+  return { copied };
+}
+
+/* =========================================================
+ * MIGRATION - tout l'espace user courant
+ * ======================================================= */
+export async function migrateOldUserDataToClient() {
+  const a = await migrateOldUserAppToClient();
+  const b = await migrateOldRunsToClient();
+  return {
+    appCopied: a.copied || 0,
+    runsCopied: b.copied || 0,
+  };
+}
+
+/* =========================================================
+ * OUTIL - crée explicitement le parent users/{uid} pour user courant
+ * ======================================================= */
+export async function ensureCurrentUserRootDoc() {
+  const uid = requireUid();
+  await ensureUserRoot(uid);
+  return { ok: true, uid };
 }
