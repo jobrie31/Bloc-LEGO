@@ -22,17 +22,3 @@ export const db = getFirestore(app);
 export const storage = getStorage(app);
 
 export default app;
-
-// Analytics optionnel
-if (typeof window !== "undefined") {
-  import("firebase/analytics")
-    .then(async ({ getAnalytics, isSupported }) => {
-      try {
-        const ok = await isSupported();
-        if (ok) getAnalytics(app);
-      } catch (_) {
-        // ignore
-      }
-    })
-    .catch(() => {});
-}
