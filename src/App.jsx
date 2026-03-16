@@ -637,7 +637,7 @@ export default function App(){
   /* ------------- UI ------------- */
   return (
     <div className="app-container">
-      <h1 className="page-title">🧱 Bloc-LEGO – Chargement optimisé</h1>
+      <h1 className="page-title">🧱 Blocs-LEGO – Chargement optimisé</h1>
 
       {/* barre utilisateur en haut à droite */}
       {signedIn && (

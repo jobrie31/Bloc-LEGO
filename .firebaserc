@@ -1,5 +1,15 @@
 {
   "projects": {
     "default": "bloc-lego"
-  }
+  },
+  "targets": {
+    "planification-styro": {
+      "hosting": {
+        "blocslego": [
+          "blocs-lego"
+        ]
+      }
+    }
+  },
+  "etags": {}
 }
